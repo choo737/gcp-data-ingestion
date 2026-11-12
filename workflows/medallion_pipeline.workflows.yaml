@@ -3,7 +3,8 @@ main:
   steps:
     - init:
         assign:
-          - raw_input: '${default(input, {})}'
+          - empty_map: {}
+          - raw_input: '${default(input, empty_map)}'
           - compute_project: '${sys.get_env("COMPUTE_PROJECT_ID")}'
           - dataform_repo_path: '${sys.get_env("DATAFORM_REPO_PATH")}'
           - dataform_release_config: '${sys.get_env("DATAFORM_RELEASE_CONFIG")}'
@@ -26,7 +27,7 @@ main:
         switch:
           - condition: '${not text.match_regex(compute_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
             raise: "Invalid COMPUTE_PROJECT_ID environment configuration"
-          - condition: '${not text.match_regex(ops_telemetry_dataset, "^[A-Za-z_][A-Za-z0-9_]{0,1023}$")}'
+          - condition: '${len(ops_telemetry_dataset) > 1024 or not text.match_regex(ops_telemetry_dataset, "^[A-Za-z_][A-Za-z0-9_]*$")}'
             raise: "Invalid OPS_TELEMETRY_DATASET environment configuration"
           - condition: '${workspace_id != "" and not text.match_regex(workspace_id, "^[A-Za-z0-9_-]{1,128}$")}'
             raise: "Invalid workspace_id execution argument"
@@ -60,7 +61,7 @@ main:
                           result: batch_status
                       - check_batch_done:
                           switch:
-                            - condition: '${not default(batch_status.body.done, false)}'
+                            - condition: '${not default(map.get(batch_status.body, "done"), false)}'
                               steps:
                                 - sleep_batch:
                                     call: sys.sleep
@@ -71,7 +72,7 @@ main:
                               raise:
                                 message: "Cloud Run batch job returned operation error"
                                 detail: '${batch_status.body.error}'
-                            - condition: '${default(map.get(default(batch_status.body.response, {}), "failedCount"), 0) > 0}'
+                            - condition: '${default(map.get(batch_status.body, ["response", "failedCount"]), 0) > 0}'
                               raise:
                                 message: "Cloud Run batch job completed with failed tasks"
                                 detail: '${batch_status.body.response}'
@@ -103,7 +104,7 @@ main:
                 result: comp
             - check_compilation_errors:
                 switch:
-                  - condition: '${len(default(comp.body.compilationErrors, [])) > 0}'
+                  - condition: '${len(default(map.get(comp.body, "compilationErrors"), [])) > 0}'
                     raise:
                       message: "Dataform compilation returned SQLX errors"
                       errors: '${comp.body.compilationErrors}'

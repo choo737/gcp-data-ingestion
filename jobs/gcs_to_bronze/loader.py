@@ -155,14 +155,29 @@ def fetch_loaded_watermarks(
     return watermarks
 
 
-def build_load_job_config(source_format: str, kms_key_id: str = "") -> bigquery.LoadJobConfig:
+def table_exists(bq_client: bigquery.Client, table_id: str) -> bool:
+    """Return True when the BigQuery destination table already exists."""
+    try:
+        bq_client.get_table(table_id)
+        return True
+    except GoogleAPICallError as exc:
+        if getattr(exc, "code", None) == 404 or type(exc).__name__ == "NotFound":
+            return False
+        raise
+
+
+def build_load_job_config(
+    source_format: str,
+    kms_key_id: str = "",
+    autodetect: bool = True,
+) -> bigquery.LoadJobConfig:
     """Construct LoadJobConfig for Bronze append loads."""
     if source_format not in SUPPORTED_SOURCE_FORMATS:
         raise ValueError(f"Unsupported SOURCE_FORMAT: {source_format}")
     kwargs: dict[str, Any] = {
         "source_format": SUPPORTED_SOURCE_FORMATS[source_format],
         "write_disposition": bigquery.WriteDisposition.WRITE_APPEND,
-        "autodetect": True,
+        "autodetect": autodetect,
     }
     if source_format == "CSV":
         kwargs["skip_leading_rows"] = 1
@@ -241,6 +256,7 @@ def run_batch(
 
     ensure_watermark_table(bq, watermark_table_id, cfg.kms_key_id)
     loaded_watermarks = fetch_loaded_watermarks(bq, watermark_table_id)
+    target_exists = table_exists(bq, target_table_id)
 
     bucket = gcs.bucket(cfg.landing_bucket)
     blobs = gcs.list_blobs(cfg.landing_bucket, prefix=cfg.source_prefix)
@@ -265,7 +281,11 @@ def run_batch(
             LOGGER.info("Skipping already loaded object %s (generation %s)", gcs_uri, generation)
             continue
 
-        job_config = build_load_job_config(cfg.source_format, cfg.kms_key_id)
+        job_config = build_load_job_config(
+            cfg.source_format,
+            cfg.kms_key_id,
+            autodetect=not target_exists,
+        )
         try:
             load_job = bq.load_table_from_uri(
                 gcs_uri,
@@ -273,6 +293,7 @@ def run_batch(
                 job_config=job_config,
             )
             load_job.result()
+            target_exists = True
             rows = int(load_job.output_rows or 0)
             record_watermark(
                 bq,

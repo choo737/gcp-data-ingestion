@@ -14,7 +14,7 @@ data "google_project" "current" {
 
 locals {
   dataset_prefix         = replace(var.prefix, "-", "_")
-  effective_kms_key_id   = trimspace(var.kms_key_id)
+  effective_kms_key_id   = var.kms_key_id != null ? trimspace(var.kms_key_id) : ""
   use_cmek               = local.effective_kms_key_id != ""
   effective_bronze_ds    = var.bronze_dataset_id != "" ? var.bronze_dataset_id : lookup(var.dataset_ids, "bronze_raw", "${local.dataset_prefix}_bronze_raw")
   effective_ops_ds       = var.ops_telemetry_dataset_id != "" ? var.ops_telemetry_dataset_id : "${local.dataset_prefix}_ops_telemetry"

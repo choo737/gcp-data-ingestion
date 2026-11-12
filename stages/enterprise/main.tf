@@ -11,7 +11,7 @@ data "google_project" "etl" {
 }
 
 locals {
-  effective_kms_key_id   = trimspace(var.kms_key_id)
+  effective_kms_key_id   = var.kms_key_id != null ? trimspace(var.kms_key_id) : ""
   use_cmek               = local.effective_kms_key_id != ""
   effective_vpc_id       = var.vpc_id != "" ? var.vpc_id : var.network_id
   effective_dataplex_key = length(var.dataplex_scan_names) > 0 ? (contains(keys(var.dataplex_scan_names), "masked_customers_canary") ? "masked_customers_canary" : sort(keys(var.dataplex_scan_names))[0]) : ""

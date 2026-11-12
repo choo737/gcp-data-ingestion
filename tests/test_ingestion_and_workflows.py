@@ -175,6 +175,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertEqual(load_args[0], "gs://bronze-proj-landing/incoming/new_orders.json")
         self.assertEqual(load_args[1], "bronze-proj.ent_bronze_raw.pos_orders_batch_cdc")
         self.assertIn("job_config", load_kwargs)
+        self.assertFalse(load_kwargs["job_config"].kwargs["autodetect"])
 
         self.assertEqual(bq_client.query.call_count, 2)
         insert_call = bq_client.query.call_args_list[1]
@@ -182,6 +183,54 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertIn("INSERT INTO `bronze-proj.ent_bronze_raw._ingestion_watermarks`", insert_sql)
         self.assertIn("@gcs_uri", insert_sql)
         self.assertNotIn("new_orders.json", insert_sql)
+
+    def test_loader_autodetects_first_blob_only_when_target_missing(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="new_orders_cdc",
+        )
+
+        not_found = GoogleAPICallError("not found")
+        setattr(not_found, "code", 404)
+
+        bq_client = MagicMock()
+        bq_client.get_table.side_effect = not_found
+        select_query_job = MagicMock()
+        select_query_job.result.return_value = []
+        insert_a = MagicMock()
+        insert_a.result.return_value = []
+        insert_b = MagicMock()
+        insert_b.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, insert_a, insert_b]
+
+        load_job = MagicMock()
+        load_job.job_id = "bq-load-new"
+        load_job.output_rows = 2
+        load_job.result.return_value = None
+        bq_client.load_table_from_uri.return_value = load_job
+
+        blob_a = MagicMock()
+        blob_a.name = "incoming/part_a.json"
+        blob_a.generation = 11
+        blob_b = MagicMock()
+        blob_b.name = "incoming/part_b.json"
+        blob_b.generation = 12
+
+        storage_client = MagicMock()
+        storage_client.list_blobs.return_value = [blob_a, blob_b]
+
+        result = loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
+        self.assertEqual(result.loaded_files, 2)
+        self.assertEqual(result.loaded_rows, 4)
+
+        calls = bq_client.load_table_from_uri.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].kwargs["job_config"].kwargs["autodetect"])
+        self.assertFalse(calls[1].kwargs["job_config"].kwargs["autodetect"])
 
     def test_loader_quarantines_failed_blob_and_raises_when_configured(self) -> None:
         cfg = loader.LoaderConfig(

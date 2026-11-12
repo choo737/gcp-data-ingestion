@@ -54,6 +54,9 @@ export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token --configuratio
 Link outputs from local `gcp-foundation` stages or from GCS into `00_linked.auto.tfvars.json`:
 
 ```bash
+# Local single-project sandbox linking:
+./scripts/link-stages.sh ../gcp-foundation/data/sandbox stages/sandbox
+
 # Local enterprise linking:
 ./scripts/link-stages.sh \
   ../gcp-foundation/foundation/02-security-network \
@@ -62,7 +65,7 @@ Link outputs from local `gcp-foundation` stages or from GCS into `00_linked.auto
   stages/enterprise
 
 # Or pull outputs exported earlier to GCS:
-./scripts/link-stages.sh --from-gcs gs://<state-bucket>/foundation-outputs.json stages/enterprise
+./scripts/link-stages.sh --from-gcs gs://<outputs-bucket>/foundation-outputs.json stages/enterprise
 ```
 
 Write customer overrides only into gitignored `custom.auto.tfvars`.
