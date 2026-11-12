@@ -14,13 +14,21 @@ MODULE_FILES = frozenset({
     "versions.tf",
 })
 
-STAGE_FILES = frozenset({
+STAGE_BASE_FILES = frozenset({
     "README.md",
     "main.tf",
     "variables.tf",
     "outputs.tf",
     "versions.tf",
     "terraform.tfvars.example",
+    ".terraform.lock.hcl",
+})
+
+ENTERPRISE_EXTRA_ENTRIES = frozenset({"envs"})
+EXPECTED_ENV_EXAMPLES = frozenset({
+    "dev.tfvars.example",
+    "staging.tfvars.example",
+    "prod.tfvars.example",
 })
 
 EXPECTED_MODULES = frozenset({
@@ -37,7 +45,6 @@ EXPECTED_STAGES = frozenset({
 
 IGNORED_NAMES = frozenset({
     ".terraform",
-    ".terraform.lock.hcl",
     "__pycache__",
     ".DS_Store",
     "terraform.tfstate",
@@ -87,7 +94,7 @@ def _discover_stages() -> list[Path]:
 
 
 class RepoSymmetryTest(unittest.TestCase):
-    """Validate 4 five-file modules, 2 six-file stages, and version pins."""
+    """Validate 4 five-file modules, locked stage contracts, envs, and pins."""
 
     def test_modules_obey_five_file_contract(self) -> None:
         modules = _discover_modules()
@@ -106,24 +113,46 @@ class RepoSymmetryTest(unittest.TestCase):
                     if entry.name in MODULE_FILES:
                         self.assertTrue(entry.is_file(), f"Expected file, found non-file: {entry}")
 
-    def test_stages_obey_six_file_contract(self) -> None:
+    def test_stages_obey_contract_lockfiles_and_envs(self) -> None:
         stages = _discover_stages()
         discovered_rel = {str(s.relative_to(REPO_ROOT)) for s in stages}
         self.assertEqual(discovered_rel, EXPECTED_STAGES)
 
         for stage_dir in stages:
-            with self.subTest(stage=str(stage_dir.relative_to(REPO_ROOT))):
+            rel = str(stage_dir.relative_to(REPO_ROOT))
+            with self.subTest(stage=rel):
                 actual = _visible_entries(stage_dir)
+                expected = set(STAGE_BASE_FILES)
+                if rel == "stages/enterprise":
+                    expected |= ENTERPRISE_EXTRA_ENTRIES
                 self.assertEqual(
                     actual,
-                    STAGE_FILES,
-                    f"{stage_dir} must contain exact 6-file contract: {sorted(STAGE_FILES)}",
+                    expected,
+                    f"{stage_dir} must contain exact entries: {sorted(expected)}",
                 )
-                for entry in stage_dir.iterdir():
-                    if entry.name in STAGE_FILES:
-                        self.assertTrue(entry.is_file(), f"Expected file, found non-file: {entry}")
+                for name in STAGE_BASE_FILES:
+                    self.assertTrue((stage_dir / name).is_file(), f"Missing {name} in {rel}")
 
-    def test_versions_tf_pins_terraform_and_google_provider(self) -> None:
+                lock_text = (stage_dir / ".terraform.lock.hcl").read_text(encoding="utf-8")
+                self.assertIn("registry.terraform.io/hashicorp/google", lock_text)
+                self.assertIn("registry.terraform.io/hashicorp/google-beta", lock_text)
+                self.assertIn("registry.terraform.io/hashicorp/time", lock_text)
+                self.assertIn("h1:", lock_text)
+                self.assertIn("zh:", lock_text)
+
+                if rel == "stages/enterprise":
+                    envs_dir = stage_dir / "envs"
+                    self.assertTrue(envs_dir.is_dir())
+                    env_entries = _visible_entries(envs_dir)
+                    self.assertEqual(env_entries, EXPECTED_ENV_EXAMPLES)
+                    dev_cfg = (envs_dir / "dev.tfvars.example").read_text(encoding="utf-8")
+                    self.assertIn("enable_schedule             = false", dev_cfg)
+                    for env_name in ("staging", "prod"):
+                        cfg = (envs_dir / f"{env_name}.tfvars.example").read_text(encoding="utf-8")
+                        self.assertIn("enable_batch_job            = true", cfg)
+                        self.assertIn("batch_vpc_egress", cfg)
+
+    def test_versions_tf_pins_providers_and_stage_gcs_backend(self) -> None:
         targets = _discover_modules() + _discover_stages()
         self.assertEqual(len(targets), len(EXPECTED_MODULES) + len(EXPECTED_STAGES))
         tf_pattern = re.compile(r'required_version\s*=\s*">=\s*1\.8\.0"')
@@ -141,18 +170,25 @@ class RepoSymmetryTest(unittest.TestCase):
                 self.assertRegex(text, google_pattern)
                 if target in _discover_stages():
                     self.assertRegex(text, time_pattern)
+                    self.assertRegex(text, r'backend\s+"gcs"\s*\{\s*\}')
 
-    def test_no_empty_string_coalesce_in_terraform(self) -> None:
+    def test_no_unsafe_coalesce_or_and_trimspace_in_terraform(self) -> None:
         bad_coalesce = re.compile(r'coalesce\([^)]*""')
+        bad_trim_and = re.compile(r'var\.[A-Za-z0-9_]+\s*!=\s*null\s*&&\s*trimspace\(')
         skip_dirs = {".git", ".terraform", "__pycache__", ".pytest_cache", ".venv"}
         for tf_path in sorted(REPO_ROOT.rglob("*.tf")):
             if any(part in skip_dirs for part in tf_path.parts):
                 continue
             rel = str(tf_path.relative_to(REPO_ROOT))
+            text = tf_path.read_text(encoding="utf-8")
             with self.subTest(file=rel):
                 self.assertIsNone(
-                    bad_coalesce.search(tf_path.read_text(encoding="utf-8")),
+                    bad_coalesce.search(text),
                     f"Empty-string coalesce found in {rel}",
+                )
+                self.assertIsNone(
+                    bad_trim_and.search(text),
+                    f"Unsafe null-and-trimspace expression found in {rel}",
                 )
 
 

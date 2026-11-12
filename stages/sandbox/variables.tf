@@ -32,6 +32,24 @@ variable "bronze_dataset_id" {
   description = "Target BigQuery Bronze dataset ID (auto-resolved from dataset_ids when empty)."
 }
 
+variable "silver_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Optional Silver BigQuery dataset ID (auto-resolved from dataset_ids when empty)."
+}
+
+variable "gold_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Optional Gold BigQuery dataset ID (auto-resolved from dataset_ids when empty)."
+}
+
+variable "assertions_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Optional Dataform assertions dataset ID (auto-resolved from dataset_ids when empty)."
+}
+
 variable "create_bronze_dataset" {
   type        = bool
   default     = false
@@ -62,10 +80,28 @@ variable "dataform_release_config_name" {
   description = "Dataform release config name linked from gcp-foundation (empty uses gitCommitish main)."
 }
 
+variable "dataform_release_config_id" {
+  type        = string
+  default     = ""
+  description = "Alias for dataform_release_config_name linked from gcp-foundation."
+}
+
+variable "dataform_git_commitish" {
+  type        = string
+  default     = "main"
+  description = "Git branch or commit used when compiling without releaseConfig."
+}
+
 variable "dataform_service_account_email" {
   type        = string
   default     = ""
   description = "Dataform ETL service account email linked from gcp-foundation."
+}
+
+variable "dataform_sa_email" {
+  type        = string
+  default     = ""
+  description = "Alias for dataform_service_account_email linked from gcp-foundation."
 }
 
 variable "dataplex_scan_names" {
@@ -74,10 +110,69 @@ variable "dataplex_scan_names" {
   description = "Map of Dataplex scan resource names linked from gcp-foundation."
 }
 
+variable "dataplex_profile_scan_id" {
+  type        = string
+  default     = ""
+  description = "Optional Dataplex profile scan resource ID linked from gcp-foundation."
+}
+
+variable "dataplex_quality_scan_id" {
+  type        = string
+  default     = ""
+  description = "Optional Dataplex auto data quality scan resource ID linked from gcp-foundation."
+}
+
 variable "kms_key_id" {
   type        = string
   default     = ""
   description = "Optional regional Cloud KMS key ID for CMEK encryption."
+}
+
+variable "kms_key_name" {
+  type        = string
+  default     = ""
+  description = "Alias for kms_key_id linked from gcp-foundation."
+}
+
+variable "pii_restricted_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog restricted PII policy tag ID for customer_ic_number."
+}
+
+variable "pii_masked_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog masked PII policy tag ID for customer_email."
+}
+
+variable "vpc_id" {
+  type        = string
+  default     = ""
+  description = "Optional VPC network resource ID for Direct VPC egress."
+}
+
+variable "subnet_id" {
+  type        = string
+  default     = ""
+  description = "Optional subnetwork resource ID for Cloud Run Direct VPC egress."
+}
+
+variable "batch_vpc_egress" {
+  type        = string
+  default     = "PRIVATE_RANGES_ONLY"
+  description = "Direct VPC egress mode for the batch loader: PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+
+  validation {
+    condition     = contains(["PRIVATE_RANGES_ONLY", "ALL_TRAFFIC"], var.batch_vpc_egress)
+    error_message = "batch_vpc_egress must be PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+  }
+}
+
+variable "notification_channel_ids" {
+  type        = list(string)
+  default     = []
+  description = "Optional Cloud Monitoring notification channel IDs for workflow failure alerts."
 }
 
 variable "delete_contents_on_destroy" {

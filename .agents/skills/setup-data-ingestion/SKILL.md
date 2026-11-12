@@ -25,17 +25,17 @@ Confirm the final command prints `true`.
 
 Never guess project IDs, dataset names, KMS keys, or database credentials.
 
-Ask the customer to select one stage:
+Ask the customer to select one stage and environment:
 
 1. **Sandbox (`stages/sandbox/`)**: Single GCP project matching `gcp-foundation/data/sandbox`.
-2. **Enterprise (`stages/enterprise/`)**: Multi-project layout linked from `gcp-foundation/data/enterprise/`.
+2. **Enterprise (`stages/enterprise/`)**: Multi-project layout with `envs/{dev,staging,prod}.tfvars.example`.
 
-Confirm these inputs before editing `custom.auto.tfvars`:
+Confirm these inputs before editing `envs/<env>.tfvars` or `custom.auto.tfvars`:
 
-- `region` (default `asia-southeast1`), `prefix`, and lifecycle flag `delete_contents_on_destroy`.
+- `environment`, `region` (default `asia-southeast1`), `prefix`, and `delete_contents_on_destroy`.
 - Active tracks: `enable_pubsub_stream`, `enable_batch_job`, `enable_datastream_cdc`, `enable_pipeline_workflow`.
-- Batch image URI (`batch_container_image`) when `enable_batch_job = true`.
-- Secret Manager version (`datastream_db_password_secret_version`) and network details when `enable_datastream_cdc = true`.
+- Batch image digest URI (`batch_container_image`) and `batch_vpc_egress` when `enable_batch_job = true`.
+- Secret Manager version (`datastream_db_password_secret_version`) and PSC or peering inputs when `enable_datastream_cdc = true`.
 
 ## Step 2: Link Upstream Foundation Outputs and Check Auth
 
@@ -57,27 +57,27 @@ Link outputs from local `gcp-foundation` stages or from GCS into `00_linked.auto
 # Local single-project sandbox linking:
 ./scripts/link-stages.sh ../gcp-foundation/data/sandbox stages/sandbox
 
-# Local enterprise linking:
-./scripts/link-stages.sh \
+# Local multi-environment enterprise linking:
+./scripts/link-stages.sh --env dev \
   ../gcp-foundation/foundation/02-security-network \
   ../gcp-foundation/data/enterprise/01-platform \
   ../gcp-foundation/data/enterprise/02-governance-ops \
   stages/enterprise
 
-# Or pull outputs exported earlier to GCS:
-./scripts/link-stages.sh --from-gcs gs://<outputs-bucket>/foundation-outputs.json stages/enterprise
+# Or pull environment outputs exported earlier to GCS:
+./scripts/link-stages.sh --env dev --from-gcs gs://<outputs-bucket>/foundation-outputs.json stages/enterprise
 ```
 
-Write customer overrides only into gitignored `custom.auto.tfvars`.
+Write customer overrides only into gitignored `custom.auto.tfvars` or untracked `envs/<env>.tfvars`.
 
 ## Step 3: Deploy with Terraform
 
-Run `init`, `plan`, and `apply` inside the chosen stage directory:
+Initialize the GCS remote backend and run `plan` and `apply`:
 
 ```bash
-terraform -chdir=stages/enterprise init
-terraform -chdir=stages/enterprise plan
-terraform -chdir=stages/enterprise apply
+make init STAGE=enterprise ENV=dev TF_STATE_BUCKET=<tf-state-bucket>
+make plan STAGE=enterprise ENV=dev
+make apply STAGE=enterprise ENV=dev
 ```
 
 ## Step 4: Verify Live Pub/Sub, DLQ Quarantine, and Cloud Workflows
@@ -86,7 +86,7 @@ Publish one valid JSON order event and confirm it lands in BigQuery:
 
 ```bash
 gcloud pubsub topics publish "${TOPIC_NAME}" --project="${ETL_PROJECT}" \
-  --message='{"order_id":"ord-canary-1","order_date":"2026-11-12","store_id":"st-01","customer_id":"cust-01","customer_ic_number":"900101145566","country_code":"MY","currency_code":"MYR","gross_amount":"120.00","discount_amount":"10.00","net_amount":"110.00","status":"COMPLETED","updated_at":"2026-11-12T01:00:00Z","_metadata_deleted":false}'
+  --message='{"order_id":"ord-canary-1","order_date":"2026-11-12","store_id":"st-01","customer_id":"cust-01","customer_ic_number":"900101145566","customer_email":"canary@example.com","country_code":"MY","currency_code":"MYR","gross_amount":"120.00","discount_amount":"10.00","tax_amount":"6.60","net_amount":"110.00","order_status":"COMPLETED","updated_at":"2026-11-12T01:00:00Z","_metadata_deleted":false}'
 
 bq query --use_legacy_sql=false --project_id="${ETL_PROJECT}" \
   "SELECT order_id, order_date, net_amount, message_id FROM \`${BRONZE_PROJECT}.${BRONZE_DATASET}.pos_orders_stream_cdc\` ORDER BY publish_time DESC LIMIT 5"
@@ -114,5 +114,5 @@ bq query --use_legacy_sql=false --project_id="${ETL_PROJECT}" \
 
 ## Step 5: Safe Two-Step Teardown
 
-1. Set `delete_contents_on_destroy = true` in `custom.auto.tfvars` and run `terraform apply`.
+1. Set `delete_contents_on_destroy = true` in overrides and run `terraform apply`.
 2. Run `terraform destroy` inside `stages/enterprise` or `stages/sandbox` before destroying `gcp-foundation`.

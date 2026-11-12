@@ -6,6 +6,6 @@ This module provisions a private connection, source profile, BigQuery profile, a
 
 - Supports `POSTGRESQL` and `MYSQL` relational sources.
 - Reads database passwords strictly from Secret Manager (`secret_manager_stored_password`).
-- Supports `psc_interface_config` or `vpc_peering_config` private connectivity.
+- Supports `psc_interface_config` (`network_attachment`) or `vpc_peering_config` private connectivity.
 - Supports BigQuery `APPEND_ONLY` or `MERGE` delivery with optional CMEK encryption.
-- Scopes Datastream IAM strictly to the target Bronze dataset and secret version.
+- Grants `roles/bigquery.jobUser` on `compute_project_id` and `roles/bigquery.dataEditor` only on `bronze_dataset_id`.

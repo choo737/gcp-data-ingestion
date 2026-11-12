@@ -12,7 +12,10 @@ locals {
     ? var.pubsub_project_number
     : data.google_project.pubsub[0].number
   )
-  pubsub_service_agent_member = "serviceAccount:service-${local.effective_pubsub_project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+  pubsub_service_agent_member  = "serviceAccount:service-${local.effective_pubsub_project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+  effective_pii_restricted_tag = var.pii_restricted_policy_tag_id != null ? trimspace(var.pii_restricted_policy_tag_id) : ""
+  effective_pii_masked_tag     = var.pii_masked_policy_tag_id != null ? trimspace(var.pii_masked_policy_tag_id) : ""
+  effective_writer_sa          = var.writer_service_account_email != null ? trimspace(var.writer_service_account_email) : ""
 
   default_proto_schema = <<-PROTO
     syntax = "proto3";
@@ -27,9 +30,11 @@ locals {
       string gross_amount = 8;
       string discount_amount = 9;
       string net_amount = 10;
-      string status = 11;
+      string order_status = 11;
       string updated_at = 12;
       bool _metadata_deleted = 13;
+      string customer_email = 14;
+      string tax_amount = 15;
     }
   PROTO
 
@@ -42,12 +47,14 @@ locals {
       { name = "store_id", type = "string" },
       { name = "customer_id", type = "string" },
       { name = "customer_ic_number", type = "string" },
+      { name = "customer_email", type = "string" },
       { name = "country_code", type = "string" },
       { name = "currency_code", type = "string" },
       { name = "gross_amount", type = "string" },
       { name = "discount_amount", type = "string" },
+      { name = "tax_amount", type = "string" },
       { name = "net_amount", type = "string" },
-      { name = "status", type = "string" },
+      { name = "order_status", type = "string" },
       { name = "updated_at", type = "string" },
       { name = "_metadata_deleted", type = "boolean" },
     ]
@@ -64,13 +71,21 @@ locals {
     { name = "order_date", type = "DATE", mode = "NULLABLE", description = "Order calendar date." },
     { name = "store_id", type = "STRING", mode = "NULLABLE", description = "Retail store identifier." },
     { name = "customer_id", type = "STRING", mode = "NULLABLE", description = "Customer identifier." },
-    { name = "customer_ic_number", type = "STRING", mode = "NULLABLE", description = "Customer identity number." },
+    merge(
+      { name = "customer_ic_number", type = "STRING", mode = "NULLABLE", description = "Customer identity number." },
+      local.effective_pii_restricted_tag != "" ? { policyTags = { names = [local.effective_pii_restricted_tag] } } : {}
+    ),
+    merge(
+      { name = "customer_email", type = "STRING", mode = "NULLABLE", description = "Customer email address." },
+      local.effective_pii_masked_tag != "" ? { policyTags = { names = [local.effective_pii_masked_tag] } } : {}
+    ),
     { name = "country_code", type = "STRING", mode = "NULLABLE", description = "ISO country code." },
     { name = "currency_code", type = "STRING", mode = "NULLABLE", description = "ISO currency code." },
     { name = "gross_amount", type = "NUMERIC", mode = "NULLABLE", description = "Gross order amount." },
     { name = "discount_amount", type = "NUMERIC", mode = "NULLABLE", description = "Discount amount applied." },
+    { name = "tax_amount", type = "NUMERIC", mode = "NULLABLE", description = "Tax amount applied." },
     { name = "net_amount", type = "NUMERIC", mode = "NULLABLE", description = "Net order amount." },
-    { name = "status", type = "STRING", mode = "NULLABLE", description = "Order lifecycle status." },
+    { name = "order_status", type = "STRING", mode = "NULLABLE", description = "Order lifecycle status." },
     { name = "updated_at", type = "TIMESTAMP", mode = "NULLABLE", description = "Source event timestamp." },
     { name = "_metadata_deleted", type = "BOOL", mode = "NULLABLE", description = "Logical delete marker." },
     { name = "subscription_name", type = "STRING", mode = "NULLABLE", description = "Pub/Sub subscription metadata." },
@@ -128,6 +143,15 @@ resource "google_pubsub_topic" "primary" {
   message_storage_policy {
     allowed_persistence_regions = [var.region]
   }
+}
+
+resource "google_pubsub_topic_iam_member" "writer_publisher" {
+  count = local.effective_writer_sa != "" ? 1 : 0
+
+  project = var.project_id
+  topic   = google_pubsub_topic.primary.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${local.effective_writer_sa}"
 }
 
 resource "google_bigquery_table" "target" {

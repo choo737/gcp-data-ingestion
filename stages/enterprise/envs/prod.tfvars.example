@@ -1,0 +1,18 @@
+# Link upstream gcp-foundation prod outputs via scripts/link-stages.sh --env prod before apply.
+# Pin batch_container_image to an immutable @sha256 digest produced by build-batch-loader.yml.
+environment                 = "prod"
+prefix                      = "ent"
+enable_pubsub_stream        = true
+pubsub_schema_type          = "PROTOCOL_BUFFER"
+enable_batch_job            = true
+batch_container_image       = "asia-southeast1-docker.pkg.dev/example-etl-project/ent-containers/gcs-to-bronze@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+batch_source_prefix         = "incoming/"
+batch_source_format         = "NEWLINE_DELIMITED_JSON"
+batch_vpc_egress            = "ALL_TRAFFIC"
+enable_datastream_cdc       = false
+datastream_cdc_mode         = "APPEND_ONLY"
+enable_pipeline_workflow    = true
+enable_schedule             = true
+schedule_cron               = "0 2 * * *"
+enable_gcs_eventarc_trigger = true
+delete_contents_on_destroy  = false

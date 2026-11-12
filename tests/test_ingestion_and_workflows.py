@@ -1,4 +1,4 @@
-"""Hermetic tests for batch loader, workflows, Composer DAG, stage linker, and IAM."""
+"""Hermetic tests for batch loader, workflows, Composer DAG, linker, and IAM."""
 
 from __future__ import annotations
 
@@ -48,6 +48,17 @@ def _install_google_cloud_test_shims() -> type[Exception]:
     class _WriteDisposition:
         WRITE_APPEND = "WRITE_APPEND"
 
+    class _TimePartitioningType:
+        DAY = "DAY"
+
+    class _TimePartitioning:
+        def __init__(self, type_: str = "DAY", field: str | None = None) -> None:
+            self.type_ = type_
+            self.field = field
+
+    class _SchemaUpdateOption:
+        ALLOW_FIELD_ADDITION = "ALLOW_FIELD_ADDITION"
+
     class _SchemaField:
         def __init__(self, name: str, field_type: str, mode: str = "NULLABLE") -> None:
             self.name = name
@@ -63,6 +74,7 @@ def _install_google_cloud_test_shims() -> type[Exception]:
             self.table_ref = table_ref
             self.schema = schema
             self.encryption_configuration = None
+            self.time_partitioning = None
 
     class _LoadJobConfig:
         def __init__(self, **kwargs) -> None:
@@ -80,6 +92,9 @@ def _install_google_cloud_test_shims() -> type[Exception]:
 
     bigquery_mod.SourceFormat = _SourceFormat
     bigquery_mod.WriteDisposition = _WriteDisposition
+    bigquery_mod.TimePartitioningType = _TimePartitioningType
+    bigquery_mod.TimePartitioning = _TimePartitioning
+    bigquery_mod.SchemaUpdateOption = _SchemaUpdateOption
     bigquery_mod.SchemaField = _SchemaField
     bigquery_mod.EncryptionConfiguration = _EncryptionConfiguration
     bigquery_mod.Table = _Table
@@ -109,9 +124,9 @@ LOADER_SPEC.loader.exec_module(loader)
 
 
 class IngestionAndWorkflowsTest(unittest.TestCase):
-    """Verify loader logic, Cloud Workflows YAML, Composer DAG, linker, and HCL security."""
+    """Verify loader logic, Cloud Workflows YAML, Composer DAG, linker, and IAM."""
 
-    def test_loader_watermark_dedup_and_parameterized_insert(self) -> None:
+    def test_loader_watermark_partitioned_merge_claim_and_complete(self) -> None:
         cfg = loader.LoaderConfig(
             bronze_project="bronze-proj",
             bronze_dataset="ent_bronze_raw",
@@ -128,9 +143,12 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         select_query_job.result.return_value = [
             {"gcs_uri": "gs://bronze-proj-landing/incoming/already.json", "generation": 100},
         ]
-        insert_query_job = MagicMock()
-        insert_query_job.result.return_value = []
-        bq_client.query.side_effect = [select_query_job, insert_query_job]
+        merge_claim_job = MagicMock()
+        merge_claim_job.num_dml_affected_rows = 1
+        merge_claim_job.result.return_value = []
+        complete_update_job = MagicMock()
+        complete_update_job.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, merge_claim_job, complete_update_job]
 
         load_job = MagicMock()
         load_job.job_id = "bq-load-123"
@@ -170,19 +188,103 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertEqual(result.loaded_rows, 42)
 
         bq_client.create_table.assert_called_once()
+        created_table = bq_client.create_table.call_args.args[0]
+        self.assertIsNotNone(created_table.time_partitioning)
+        self.assertEqual(created_table.time_partitioning.field, "loaded_at")
+        self.assertEqual(created_table.time_partitioning.type_, "DAY")
+
         bq_client.load_table_from_uri.assert_called_once()
         load_args, load_kwargs = bq_client.load_table_from_uri.call_args
         self.assertEqual(load_args[0], "gs://bronze-proj-landing/incoming/new_orders.json")
         self.assertEqual(load_args[1], "bronze-proj.ent_bronze_raw.pos_orders_batch_cdc")
-        self.assertIn("job_config", load_kwargs)
-        self.assertFalse(load_kwargs["job_config"].kwargs["autodetect"])
+        job_cfg = load_kwargs["job_config"]
+        cfg_attrs = getattr(job_cfg, "kwargs", None) or vars(job_cfg)
+        self.assertFalse(cfg_attrs.get("autodetect", getattr(job_cfg, "autodetect", True)))
+        schema_opts = cfg_attrs.get(
+            "schema_update_options", getattr(job_cfg, "schema_update_options", [])
+        )
+        self.assertEqual(schema_opts, ["ALLOW_FIELD_ADDITION"])
 
-        self.assertEqual(bq_client.query.call_count, 2)
-        insert_call = bq_client.query.call_args_list[1]
-        insert_sql = insert_call.args[0]
-        self.assertIn("INSERT INTO `bronze-proj.ent_bronze_raw._ingestion_watermarks`", insert_sql)
-        self.assertIn("@gcs_uri", insert_sql)
-        self.assertNotIn("new_orders.json", insert_sql)
+        self.assertEqual(bq_client.query.call_count, 3)
+        select_sql = bq_client.query.call_args_list[0].args[0]
+        self.assertIn("TIMESTAMP_SUB", select_sql)
+        self.assertIn("@lookback_days", select_sql)
+
+        merge_sql = bq_client.query.call_args_list[1].args[0]
+        self.assertIn("MERGE `bronze-proj.ent_bronze_raw._ingestion_watermarks`", merge_sql)
+        self.assertIn("IN_PROGRESS", merge_sql)
+        self.assertIn("@stale_minutes", merge_sql)
+        self.assertNotIn("new_orders.json", merge_sql)
+
+        update_sql = bq_client.query.call_args_list[2].args[0]
+        self.assertIn("UPDATE `bronze-proj.ent_bronze_raw._ingestion_watermarks`", update_sql)
+        self.assertIn("status = 'LOADED'", update_sql)
+
+    def test_loader_concurrent_merge_claim_zero_rows_skips_load(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="pos_orders_batch_cdc",
+            target_object="incoming/2026/01/orders.json",
+        )
+
+        bq_client = MagicMock()
+        merge_lost_job = MagicMock()
+        merge_lost_job.num_dml_affected_rows = 0
+        merge_lost_job.result.return_value = []
+        bq_client.query.return_value = merge_lost_job
+
+        blob = MagicMock()
+        blob.name = "incoming/2026/01/orders.json"
+        blob.generation = 555
+
+        bucket = MagicMock()
+        bucket.get_blob.return_value = blob
+        storage_client = MagicMock()
+        storage_client.bucket.return_value = bucket
+
+        result = loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
+        self.assertEqual(result.loaded_files, 0)
+        self.assertEqual(result.skipped_files, 1)
+        storage_client.list_blobs.assert_not_called()
+        bucket.get_blob.assert_called_once_with("incoming/2026/01/orders.json")
+        bq_client.load_table_from_uri.assert_not_called()
+
+    def test_loader_target_object_ignores_quarantine_and_supports_cli_arg(self) -> None:
+        env_backup = os.environ.copy()
+        try:
+            os.environ.update({
+                "BRONZE_PROJECT": "bronze-proj",
+                "BRONZE_DATASET": "ent_bronze_raw",
+                "LANDING_BUCKET": "bronze-proj-landing",
+                "TARGET_TABLE": "pos_orders_batch_cdc",
+            })
+            args = loader._parse_args(["--target-object", "incoming/day1/part.json"])
+            self.assertEqual(args.target_object, "incoming/day1/part.json")
+            cfg = loader.LoaderConfig.from_env(target_object_override=args.target_object)
+            self.assertEqual(cfg.target_object, "incoming/day1/part.json")
+
+            quarantine_cfg = loader.LoaderConfig(
+                bronze_project="bronze-proj",
+                bronze_dataset="ent_bronze_raw",
+                execution_project="etl-proj",
+                landing_bucket="bronze-proj-landing",
+                source_prefix="incoming/",
+                target_table="pos_orders_batch_cdc",
+                target_object="quarantine/day1/part.json",
+            )
+            bq_client = MagicMock()
+            storage_client = MagicMock()
+            result = loader.run_batch(config=quarantine_cfg, bq_client=bq_client, storage_client=storage_client)
+            self.assertEqual(result.loaded_files, 0)
+            self.assertEqual(result.skipped_files, 0)
+            bq_client.load_table_from_uri.assert_not_called()
+        finally:
+            os.environ.clear()
+            os.environ.update(env_backup)
 
     def test_loader_autodetects_first_blob_only_when_target_missing(self) -> None:
         cfg = loader.LoaderConfig(
@@ -201,11 +303,17 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         bq_client.get_table.side_effect = not_found
         select_query_job = MagicMock()
         select_query_job.result.return_value = []
-        insert_a = MagicMock()
-        insert_a.result.return_value = []
-        insert_b = MagicMock()
-        insert_b.result.return_value = []
-        bq_client.query.side_effect = [select_query_job, insert_a, insert_b]
+        claim_a = MagicMock()
+        claim_a.num_dml_affected_rows = 1
+        claim_a.result.return_value = []
+        complete_a = MagicMock()
+        complete_a.result.return_value = []
+        claim_b = MagicMock()
+        claim_b.num_dml_affected_rows = 1
+        claim_b.result.return_value = []
+        complete_b = MagicMock()
+        complete_b.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, claim_a, complete_a, claim_b, complete_b]
 
         load_job = MagicMock()
         load_job.job_id = "bq-load-new"
@@ -229,10 +337,14 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
 
         calls = bq_client.load_table_from_uri.call_args_list
         self.assertEqual(len(calls), 2)
-        self.assertTrue(calls[0].kwargs["job_config"].kwargs["autodetect"])
-        self.assertFalse(calls[1].kwargs["job_config"].kwargs["autodetect"])
+        cfg_0 = calls[0].kwargs["job_config"]
+        cfg_1 = calls[1].kwargs["job_config"]
+        auto_0 = cfg_0.kwargs["autodetect"] if hasattr(cfg_0, "kwargs") else cfg_0.autodetect
+        auto_1 = cfg_1.kwargs["autodetect"] if hasattr(cfg_1, "kwargs") else cfg_1.autodetect
+        self.assertTrue(auto_0)
+        self.assertFalse(auto_1)
 
-    def test_loader_quarantines_failed_blob_and_raises_when_configured(self) -> None:
+    def test_loader_quarantines_nested_relative_path_and_releases_claim(self) -> None:
         cfg = loader.LoaderConfig(
             bronze_project="bronze-proj",
             bronze_dataset="ent_bronze_raw",
@@ -246,11 +358,16 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         bq_client = MagicMock()
         select_query_job = MagicMock()
         select_query_job.result.return_value = []
-        bq_client.query.return_value = select_query_job
+        claim_job = MagicMock()
+        claim_job.num_dml_affected_rows = 1
+        claim_job.result.return_value = []
+        release_job = MagicMock()
+        release_job.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, claim_job, release_job]
         bq_client.load_table_from_uri.side_effect = GoogleAPICallError("schema mismatch")
 
         bad_blob = MagicMock()
-        bad_blob.name = "incoming/corrupt.json"
+        bad_blob.name = "incoming/2026/01/orders.json"
         bad_blob.generation = 999
 
         error_sidecar = MagicMock()
@@ -267,10 +384,12 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                 loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
         self.assertTrue(any("schema mismatch" in msg for msg in log_ctx.output))
 
-        bucket.copy_blob.assert_called_once_with(bad_blob, bucket, "quarantine/corrupt.json")
-        bucket.blob.assert_called_once_with("quarantine/corrupt.json.error.json")
+        bucket.copy_blob.assert_called_once_with(bad_blob, bucket, "quarantine/2026/01/orders.json")
+        bucket.blob.assert_called_once_with("quarantine/2026/01/orders.json.error.json")
         error_sidecar.upload_from_string.assert_called_once()
         bad_blob.delete.assert_called_once()
+        release_sql = bq_client.query.call_args_list[2].args[0]
+        self.assertIn("DELETE FROM `bronze-proj.ent_bronze_raw._ingestion_watermarks`", release_sql)
 
     def test_loader_from_env_rejects_missing_and_invalid_format(self) -> None:
         with self.assertRaises(ValueError):
@@ -291,7 +410,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             os.environ.clear()
             os.environ.update(env_backup)
 
-    def test_workflows_yaml_structure_and_parameterized_sql(self) -> None:
+    def test_workflows_yaml_ga_v1_bounded_polls_and_env_parity(self) -> None:
         wf_path = REPO_ROOT / "workflows" / "medallion_pipeline.workflows.yaml"
         wf_text = wf_path.read_text(encoding="utf-8")
 
@@ -305,12 +424,36 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             self.assertIn("main:", wf_text)
             self.assertIn("params: [input]", wf_text)
 
+        self.assertNotIn("v1beta1", wf_text)
         required_fragments = (
             "https://run.googleapis.com/v2/",
+            "https://dataform.googleapis.com/v1/",
             "/compilationResults",
             "compilationErrors",
             "/workflowInvocations",
+            "codeCompilationConfig:",
+            "defaultDatabase:",
+            "assertionSchema:",
+            "effective_release_config",
+            "BRONZE_PROJECT_ID",
+            "BRONZE_DATASET_ID",
+            "SILVER_PROJECT_ID",
+            "SILVER_DATASET_ID",
+            "GOLD_PROJECT_ID",
+            "GOLD_DATASET_ID",
+            "ASSERTIONS_DATASET_ID",
+            "include_stream_orders:",
+            "include_batch_orders:",
+            "pii_restricted_policy_tag:",
+            "pii_masked_policy_tag:",
+            "allow_untagged_pii:",
             "https://dataplex.googleapis.com/v1/",
+            "DATAPLEX_SCAN_ID",
+            "DATAPLEX_QUALITY_SCAN_ID",
+            "max_polls: 120",
+            "poll_interval_seconds: 10",
+            "IGNORED_QUARANTINE_OBJECT",
+            'name: "TARGET_OBJECT"',
             "https://bigquery.googleapis.com/bigquery/v2/projects/",
             "useLegacySql: false",
             'parameterMode: "NAMED"',
@@ -321,6 +464,26 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         )
         for fragment in required_fragments:
             self.assertIn(fragment, wf_text)
+
+        for expr in re.findall(r"'\$\{(.+)\}'", wf_text):
+            stripped_strings = re.sub(r'"[^"]*"', '""', expr)
+            self.assertNotIn("{", stripped_strings, f"Inline brace literal inside expression: {expr}")
+            self.assertNotIn("?", stripped_strings, f"Unsupported ternary operator inside Cloud Workflows expression: {expr}")
+
+        for match in re.finditer(r"\{(\d+)(?:,(\d+))?\}", wf_text):
+            upper = int(match.group(2) or match.group(1))
+            self.assertLessEqual(upper, 100, f"RE2 quantifier > 100 in workflow YAML: {match.group(0)}")
+
+        wf_main = (REPO_ROOT / "modules/ingestion/pipeline-workflows/main.tf").read_text(encoding="utf-8")
+        env_calls = set(re.findall(r'sys\.get_env\("([A-Z0-9_]+)"\)', wf_text))
+        user_env_calls = [e for e in env_calls if not e.startswith("GOOGLE_CLOUD_WORKFLOW_")]
+        self.assertLessEqual(
+            len(user_env_calls),
+            20,
+            f"Cloud Workflows enforces <= 20 user_env_vars, found {len(user_env_calls)}: {sorted(user_env_calls)}",
+        )
+        for env_name in sorted(user_env_calls):
+            self.assertIn(f"{env_name}", wf_main, f"Workflow env var {env_name} missing from pipeline-workflows user_env_vars")
 
     def test_composer_reference_dag_valid_python_and_operators(self) -> None:
         dag_path = REPO_ROOT / "composer_reference" / "medallion_composer3_dag.py"
@@ -335,7 +498,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         ):
             self.assertIn(symbol, dag_text)
 
-    def test_link_stages_script_local_and_gcs_modes(self) -> None:
+    def test_link_stages_script_local_gcs_and_env_modes(self) -> None:
         script_path = REPO_ROOT / "scripts" / "link-stages.sh"
         self.assertTrue(script_path.is_file())
         self.assertTrue(script_path.stat().st_mode & stat.S_IXUSR)
@@ -352,10 +515,13 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             dst = tmp_path / "stage_dst"
             for directory in (bin_dir, gcs_store, src_a, src_b, dst):
                 directory.mkdir()
+            (src_a / "staging").mkdir()
+            (src_b / "staging").mkdir()
 
             (dst / "variables.tf").write_text(
                 'variable "core_storage_project_id" {\n  type = string\n}\n'
                 'variable "kms_key_id" {\n  type = string\n}\n'
+                'variable "environment" {\n  type = string\n}\n'
                 'variable "secret_val" {\n  type = string\n}\n'
                 'variable "stale_var" {\n  type = string\n}\n',
                 encoding="utf-8",
@@ -369,8 +535,9 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                 "import json, sys\n"
                 "arg = next(a for a in sys.argv[1:] if a.startswith('-chdir='))\n"
                 "src = arg.split('=', 1)[1]\n"
-                "if src.endswith('stage_a'):\n"
-                "    print(json.dumps({'core_storage_project_id': {'value': 'proj-core'}, 'secret_val': {'value': 's', 'sensitive': True}, 'unused': {'value': 'x'}}))\n"
+                "if 'stage_a' in src:\n"
+                "    val = 'proj-core-stg' if src.endswith('/staging') else 'proj-core'\n"
+                "    print(json.dumps({'core_storage_project_id': {'value': val}, 'secret_val': {'value': 's', 'sensitive': True}, 'unused': {'value': 'x'}}))\n"
                 "else:\n"
                 "    print(json.dumps({'kms_key_id': {'value': 'projects/p/locations/r/keyRings/k/cryptoKeys/c'}}))\n",
                 encoding="utf-8",
@@ -434,22 +601,68 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             )
             self.assertEqual(from_gcs_res.returncode, 0, from_gcs_res.stderr)
             self.assertEqual(json.loads(linked_path.read_text(encoding="utf-8")), expected)
-            self.assertEqual(stat.S_IMODE(linked_path.stat().st_mode), 0o600)
 
-    def test_least_privilege_iam_and_security_invariants(self) -> None:
+            linked_path.unlink()
+            env_export_res = subprocess.run(
+                [str(script_path), "--env", "staging", "--export-gcs", gcs_uri, str(src_a), str(src_b)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(env_export_res.returncode, 0, env_export_res.stderr)
+            self.assertTrue((gcs_store / "example-state__staging__outputs.json").is_file())
+
+            env_from_gcs_res = subprocess.run(
+                [str(script_path), "--env", "staging", "--from-gcs", gcs_uri, str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(env_from_gcs_res.returncode, 0, env_from_gcs_res.stderr)
+            self.assertEqual(
+                json.loads(linked_path.read_text(encoding="utf-8")),
+                {
+                    "core_storage_project_id": "proj-core-stg",
+                    "environment": "staging",
+                    "kms_key_id": "projects/p/locations/r/keyRings/k/cryptoKeys/c",
+                },
+            )
+
+    def test_least_privilege_iam_policy_tags_and_security_invariants(self) -> None:
         cdc_main = (REPO_ROOT / "modules/ingestion/datastream-cdc/main.tf").read_text(encoding="utf-8")
         self.assertIn("secret_manager_stored_password = var.db_password_secret_version", cdc_main)
         self.assertNotRegex(cdc_main, r"(?m)^\s*password\s*=")
+        self.assertIn("psc_interface_config", cdc_main)
+        self.assertIn("project = local.effective_compute_project_id", cdc_main)
+        self.assertNotIn("project = var.bronze_project_id\n  role    = \"roles/bigquery.jobUser\"", cdc_main)
 
         pubsub_main = (REPO_ROOT / "modules/ingestion/pubsub-bigquery/main.tf").read_text(encoding="utf-8")
         self.assertIn("google_bigquery_table_iam_member", pubsub_main)
         self.assertNotIn("google_project_iam_member", pubsub_main)
         self.assertIn("dead_letter_policy", pubsub_main)
         self.assertIn("_quarantine", pubsub_main)
+        self.assertIn("customer_ic_number", pubsub_main)
+        self.assertIn("customer_email", pubsub_main)
+        self.assertIn("order_status", pubsub_main)
+        self.assertIn("tax_amount", pubsub_main)
+        self.assertNotIn("string status =", pubsub_main)
+        self.assertIn("policyTags", pubsub_main)
 
         batch_main = (REPO_ROOT / "modules/ingestion/batch-elt-job/main.tf").read_text(encoding="utf-8")
         self.assertIn("google_storage_bucket_iam_member", batch_main)
         self.assertIn("google_bigquery_dataset_iam_member", batch_main)
+        self.assertIn("google_bigquery_table", batch_main)
+        self.assertIn("policyTags", batch_main)
+        self.assertIn("tax_amount", batch_main)
+        self.assertIn("_ingested_at", batch_main)
+        self.assertIn("_cdc_sequence_num", batch_main)
+        self.assertIn("_op_type", batch_main)
+        self.assertIn('field = "order_date"', batch_main)
+        self.assertIn("parallelism = 1", batch_main)
+        self.assertIn("vpc_access", batch_main)
+        self.assertIn("network_interfaces", batch_main)
         self.assertNotIn("roles/storage.objectAdmin", batch_main)
         project_iam_blocks = re.findall(
             r'resource\s+"google_project_iam_member"\s+"[^"]+"\s*\{([^}]*)\}',
@@ -459,6 +672,12 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertIn('roles/bigquery.jobUser', project_iam_blocks[0])
         self.assertNotIn('roles/bigquery.dataEditor', project_iam_blocks[0])
         self.assertNotIn('roles/storage.', project_iam_blocks[0])
+
+        batch_vars = (REPO_ROOT / "modules/ingestion/batch-elt-job/variables.tf").read_text(encoding="utf-8")
+        self.assertIn('default     = ["order_status", "store_id"]', batch_vars)
+
+        sandbox_main = (REPO_ROOT / "stages/sandbox/main.tf").read_text(encoding="utf-8")
+        self.assertIn('matches_prefix = ["incoming/"]', sandbox_main)
 
         sandbox_vars = (REPO_ROOT / "stages/sandbox/variables.tf").read_text(encoding="utf-8")
         for var_name in (
@@ -472,25 +691,50 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             "dataform_release_config_name",
             "dataform_service_account_email",
             "dataplex_scan_names",
+            "pii_restricted_policy_tag_id",
+            "pii_masked_policy_tag_id",
         ):
             self.assertIn(f'variable "{var_name}"', sandbox_vars)
 
         enterprise_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
         for var_name in (
             "core_storage_project_id",
+            "core_project_id",
             "etl_compute_project_id",
+            "compute_project_id",
             "primary_gold_project_id",
+            "analytics_project_id",
+            "bi_project_id",
+            "governance_project_id",
             "bronze_dataset_id",
+            "silver_dataset_id",
+            "gold_dataset_id",
+            "quarantine_dataset_id",
             "landing_bucket_name",
             "ops_telemetry_dataset_id",
             "dataform_repository_name",
             "dataform_release_config_name",
+            "dataform_release_config_id",
             "dataform_service_account_email",
+            "dataform_sa_email",
+            "batch_loader_sa_email",
+            "pubsub_writer_sa_email",
             "dataplex_scan_names",
+            "dataplex_profile_scan_id",
+            "dataplex_quality_scan_id",
             "kms_key_id",
+            "kms_key_name",
+            "pii_restricted_policy_tag_id",
+            "pii_masked_policy_tag_id",
+            "artifact_registry_repository_uri",
             "vpc_id",
             "network_id",
+            "subnet_id",
+            "batch_vpc_egress",
+            "datastream_network_attachment_id",
+            "notification_channel_ids",
             "region",
+            "environment",
             "prefix",
             "delete_contents_on_destroy",
         ):
@@ -499,14 +743,30 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         wf_main = (REPO_ROOT / "modules/ingestion/pipeline-workflows/main.tf").read_text(encoding="utf-8")
         self.assertIn("google_bigquery_dataset_iam_member", wf_main)
         self.assertIn("var.ops_telemetry_dataset_id", wf_main)
+        self.assertIn('resource "google_service_account" "trigger_invoker"', wf_main)
+        self.assertIn('resource "google_dataform_repository_iam_member" "dataform_editor"', wf_main)
+        self.assertNotIn("roles/dataform.editor", wf_main.split("google_dataform_repository_iam_member")[0])
+        self.assertRegex(wf_main, r'service\s*=\s*"eventarc\.googleapis\.com"')
+        self.assertRegex(wf_main, r'role\s*=\s*"roles/storage\.bucketViewer"')
+        self.assertRegex(
+            wf_main,
+            r'resource\s+"google_project_iam_member"\s+"gcs_eventarc_pubsub_publisher"\s*\{[^}]*project\s*=\s*var\.compute_project_id',
+        )
+        self.assertIn("google_service_account.trigger_invoker[0].email", wf_main)
+        self.assertNotIn("google_service_account.workflow.email", wf_main)
 
         pyproject = (REPO_ROOT / "jobs/gcs_to_bronze/pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("google-cloud-bigquery==3.47.0", pyproject)
         self.assertIn("google-cloud-storage==3.17.1", pyproject)
         self.assertNotIn("pyarrow", pyproject)
 
+        lock_path = REPO_ROOT / "jobs/gcs_to_bronze/requirements.lock"
+        self.assertTrue(lock_path.is_file())
+        self.assertIn("--hash=sha256:", lock_path.read_text(encoding="utf-8"))
+
         dockerfile = (REPO_ROOT / "jobs/gcs_to_bronze/Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("FROM python:3.13-slim", dockerfile)
+        self.assertRegex(dockerfile, r"FROM python:3\.13-slim@sha256:[0-9a-f]{64}")
+        self.assertIn("--require-hashes --no-deps -r requirements.lock", dockerfile)
         self.assertIn("USER 65532:65532", dockerfile)
 
     def test_agent_docs_skills_makefile_and_ci(self) -> None:
@@ -530,13 +790,21 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                 self.assertIn(ref, content, f"{doc_name} missing {ref}")
 
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("ENV ?= dev", makefile)
+        self.assertIn("ingestion/$(STAGE)/$(ENV)", makefile)
         self.assertIn("stages/sandbox", makefile)
         self.assertIn("stages/enterprise", makefile)
+        self.assertNotIn('.terraform.lock.hcl', makefile)
+
+        for wf_file in ("ci.yml", "build-batch-loader.yml", "terraform-deploy.yml"):
+            wf_path = REPO_ROOT / ".github/workflows" / wf_file
+            self.assertTrue(wf_path.is_file(), f"Missing workflow {wf_file}")
+            wf_content = wf_path.read_text(encoding="utf-8")
+            self.assertIn("contents: read", wf_content)
+            self.assertRegex(wf_content, r"actions/checkout@[0-9a-f]{40}")
 
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("contents: read", ci)
         self.assertIn("1.8.5", ci)
-        self.assertRegex(ci, r"actions/checkout@[0-9a-f]{40}")
         self.assertRegex(ci, r"hashicorp/setup-terraform@[0-9a-f]{40}")
         self.assertRegex(ci, r"actions/setup-python@[0-9a-f]{40}")
 

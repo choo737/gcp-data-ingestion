@@ -18,10 +18,10 @@ Keep shared `modules/ingestion/`, `workflows/`, and `scripts/link-stages.sh` int
 
 ## 2. Export Shared Foundation Outputs Once
 
-On the platform team side inside `gcp-foundation`, export shared outputs to a restricted GCS state bucket:
+On the platform team side inside `gcp-foundation`, export shared outputs per environment to GCS:
 
 ```bash
-./scripts/link-stages.sh --export-gcs gs://<platform-state-bucket>/foundation-outputs.json \
+./scripts/link-stages.sh --env prod --export-gcs gs://<platform-state-bucket>/foundation-outputs.json \
   foundation/02-security-network \
   data/enterprise/01-platform \
   data/enterprise/02-governance-ops
@@ -32,7 +32,7 @@ On the platform team side inside `gcp-foundation`, export shared outputs to a re
 In each `ingest-<domain>` repository, pull only declared variables into `00_linked.auto.tfvars.json`:
 
 ```bash
-./scripts/link-stages.sh --from-gcs gs://<platform-state-bucket>/foundation-outputs.json stages/enterprise
+./scripts/link-stages.sh --env prod --from-gcs gs://<platform-state-bucket>/foundation-outputs.json stages/enterprise
 ```
 
 Set a domain-unique `prefix` (for example `ret` or `fin`) in `custom.auto.tfvars` to avoid name collisions.

@@ -10,7 +10,17 @@ output "workflow_name" {
 
 output "workflow_service_account_email" {
   value       = google_service_account.workflow.email
-  description = "Dedicated service account email attached to the Cloud Workflow."
+  description = "Dedicated runtime service account email attached to the Cloud Workflow."
+}
+
+output "trigger_service_account_email" {
+  value       = try(google_service_account.trigger_invoker[0].email, "")
+  description = "Minimal invoker service account email used by Cloud Scheduler and Eventarc."
+}
+
+output "alert_policy_id" {
+  value       = try(google_monitoring_alert_policy.workflow_failure[0].id, "")
+  description = "Cloud Monitoring alert policy ID when notification channels are set."
 }
 
 output "alert_topic_id" {
@@ -29,6 +39,6 @@ output "scheduler_job_id" {
 }
 
 output "eventarc_trigger_id" {
-  value       = try(google_eventarc_trigger.gcs[0].id, "")
+  value       = try(google_eventarc_trigger.gcs[0].id, try(google_eventarc_trigger.gcs_cross_project[0].id, ""))
   description = "Eventarc GCS trigger ID when enabled, or empty string."
 }

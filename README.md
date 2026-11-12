@@ -23,48 +23,56 @@ gh repo create acme-corp/gcp-data-ingestion --private --template choo737/gcp-dat
 
 ## Ingestion Tracks and Pipeline Runner
 
-1. **Datastream CDC (`modules/ingestion/datastream-cdc`)**: Streams PostgreSQL or MySQL changes into Bronze using Secret Manager passwords.
-2. **Pub/Sub to BigQuery (`modules/ingestion/pubsub-bigquery`)**: Validates JSON payloads via topic schemas and routes failures to quarantine tables.
-3. **Batch ELT Job (`modules/ingestion/batch-elt-job` + `jobs/gcs_to_bronze/`)**: Runs idempotent Cloud Run loads with BigQuery watermark deduplication.
-4. **Pipeline Workflows (`modules/ingestion/pipeline-workflows` + `workflows/`)**: Triggers batch loads, Dataform runs, Dataplex scans, telemetry, and alerts.
+1. **Datastream CDC (`modules/ingestion/datastream-cdc`)**: Streams PostgreSQL or MySQL changes using Secret Manager passwords and PSC or peering.
+2. **Pub/Sub to BigQuery (`modules/ingestion/pubsub-bigquery`)**: Validates JSON events, applies PII policy tags, and routes errors to quarantine.
+3. **Batch ELT Job (`modules/ingestion/batch-elt-job` + `jobs/gcs_to_bronze/`)**: Runs atomic Cloud Run loads with Direct VPC egress and policy-tagged tables.
+4. **Pipeline Workflows (`modules/ingestion/pipeline-workflows` + `workflows/`)**: Triggers batch loads, Dataform GA `v1` runs, Dataplex scans, telemetry, and alerts.
 
-## Day 1 Alice to Day 10 Bob Handoff Walkthrough
+## Multi-Environment Deployment and Handoff
 
-Alice deploys `gcp-foundation` on Day 1 and exports non-sensitive outputs to a secure GCS bucket.
+Alice exports non-sensitive foundation outputs per environment to GCS on Day 1.
 
 ```bash
-# Day 1 (Alice in gcp-foundation): export non-sensitive stage outputs to GCS.
-./scripts/link-stages.sh --export-gcs gs://example-platform-state/foundation-outputs.json \
+# Day 1 (Alice in gcp-foundation): export dev, staging, or prod outputs.
+./scripts/link-stages.sh --env prod --export-gcs gs://example-platform-state/foundation-outputs.json \
   foundation/02-security-network \
   data/enterprise/01-platform \
   data/enterprise/02-governance-ops
 ```
 
-Bob joins on Day 10 with no local state files from Alice's laptop.
+Bob links outputs into `stages/enterprise` and initializes remote GCS state on Day 10.
 
 ```bash
-# Day 10 (Bob in gcp-data-ingestion): pull exported outputs into 00_linked.auto.tfvars.json.
-./scripts/link-stages.sh --from-gcs \
+# Day 10 (Bob in gcp-data-ingestion): pull environment outputs and apply.
+./scripts/link-stages.sh --env prod --from-gcs \
   gs://example-platform-state/foundation-outputs.json \
   stages/enterprise
 
-cp stages/enterprise/terraform.tfvars.example stages/enterprise/custom.auto.tfvars
-terraform -chdir=stages/enterprise init
-terraform -chdir=stages/enterprise apply
+cp stages/enterprise/envs/prod.tfvars.example stages/enterprise/envs/prod.tfvars
+make init STAGE=enterprise ENV=prod TF_STATE_BUCKET=example-tf-state-bucket
+make plan STAGE=enterprise ENV=prod
+make apply STAGE=enterprise ENV=prod
 ```
 
-- When running both repositories on one workstation, pass local stage paths instead of GCS URIs.
-- `scripts/link-stages.sh` filters outputs to declared variables in `variables.tf` and writes `00_linked.auto.tfvars.json` (`0600`).
+- Pass local stage directories to `scripts/link-stages.sh` when running all repositories on one machine.
+- `scripts/link-stages.sh` filters declared variables and writes `00_linked.auto.tfvars.json` (`0600`).
+- Commit `.terraform.lock.hcl` for `linux_amd64` and `darwin_arm64` in both stages.
+
+## CI/CD Workflows
+
+- `.github/workflows/ci.yml`: Runs formatting, `terraform validate`, and Python unit tests on every push and PR.
+- `.github/workflows/build-batch-loader.yml`: Builds `jobs/gcs_to_bronze` with locked hashes and pushes immutable digests when WIF is set.
+- `.github/workflows/terraform-deploy.yml`: Plans pull requests and promotes `dev`, `staging`, and `prod` via GitHub Environments.
 
 ## Repository Layout
 
 - `modules/ingestion/`: Reusable five-file Terraform modules (`datastream-cdc`, `pubsub-bigquery`, `batch-elt-job`, `pipeline-workflows`).
-- `stages/sandbox/`: Single-project stage compatible with `gcp-foundation/data/sandbox` outputs.
-- `stages/enterprise/`: Multi-project stage consuming `00_linked.auto.tfvars.json` from `gcp-foundation`.
-- `jobs/gcs_to_bronze/`: Python `3.13` Cloud Run batch loader container and dependencies.
-- `workflows/`: Cloud Workflows YAML definition (`medallion_pipeline.workflows.yaml`).
+- `stages/sandbox/`: Single-project stage with GCS remote backend and committed `.terraform.lock.hcl`.
+- `stages/enterprise/`: Multi-project stage with `envs/{dev,staging,prod}.tfvars.example` and committed `.terraform.lock.hcl`.
+- `jobs/gcs_to_bronze/`: Python `3.13` Cloud Run batch loader with pinned digest base image and `requirements.lock`.
+- `workflows/`: Cloud Workflows GA `v1` pipeline definition (`medallion_pipeline.workflows.yaml`).
 - `composer_reference/`: Reference Airflow DAG (`medallion_composer3_dag.py`) for Cloud Composer 3 scaling.
-- `scripts/link-stages.sh`: Local and GCS stage output linker.
+- `scripts/link-stages.sh`: Local and GCS stage output linker supporting `--env`.
 
 ## Quick Verification
 

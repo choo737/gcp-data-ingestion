@@ -1,0 +1,13 @@
+# Link upstream gcp-foundation outputs via scripts/link-stages.sh --env dev before apply.
+# Store project-specific overrides inside untracked custom.auto.tfvars.
+environment                 = "dev"
+prefix                      = "ent-dev"
+enable_pubsub_stream        = true
+pubsub_schema_type          = "PROTOCOL_BUFFER"
+enable_batch_job            = false
+batch_vpc_egress            = "PRIVATE_RANGES_ONLY"
+enable_datastream_cdc       = false
+enable_pipeline_workflow    = true
+enable_schedule             = false
+enable_gcs_eventarc_trigger = false
+delete_contents_on_destroy  = false

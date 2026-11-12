@@ -3,9 +3,11 @@ data "google_project" "datastream" {
 }
 
 locals {
-  sanitized_base = trimsuffix(substr(lower(replace("${var.prefix}-${var.stream_name}", "_", "-")), 0, 48), "-")
-  effective_port = var.db_port > 0 ? var.db_port : (var.source_engine == "POSTGRESQL" ? 5432 : 3306)
-  db_secret_id   = regex("^(projects/[^/]+/secrets/[^/]+)/versions/", var.db_password_secret_version)[0]
+  sanitized_base               = trimsuffix(substr(lower(replace("${var.prefix}-${var.stream_name}", "_", "-")), 0, 48), "-")
+  effective_port               = var.db_port > 0 ? var.db_port : (var.source_engine == "POSTGRESQL" ? 5432 : 3306)
+  db_secret_id                 = regex("^(projects/[^/]+/secrets/[^/]+)/versions/", var.db_password_secret_version)[0]
+  trimmed_compute_project_id   = var.compute_project_id != null ? trimspace(var.compute_project_id) : ""
+  effective_compute_project_id = local.trimmed_compute_project_id != "" ? local.trimmed_compute_project_id : var.project_id
 
   datastream_service_agent = "serviceAccount:service-${data.google_project.datastream.number}@gcp-sa-datastream.iam.gserviceaccount.com"
 
@@ -38,8 +40,8 @@ resource "google_bigquery_dataset_iam_member" "datastream_bronze_editor" {
   member     = local.datastream_service_agent
 }
 
-resource "google_project_iam_member" "datastream_bronze_job_user" {
-  project = var.bronze_project_id
+resource "google_project_iam_member" "datastream_compute_job_user" {
+  project = local.effective_compute_project_id
   role    = "roles/bigquery.jobUser"
   member  = local.datastream_service_agent
 }
@@ -223,6 +225,6 @@ resource "google_datastream_stream" "this" {
 
   depends_on = [
     google_bigquery_dataset_iam_member.datastream_bronze_editor,
-    google_project_iam_member.datastream_bronze_job_user,
+    google_project_iam_member.datastream_compute_job_user,
   ]
 }

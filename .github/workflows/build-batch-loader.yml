@@ -1,0 +1,83 @@
+name: Build Batch Loader Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "jobs/gcs_to_bronze/**"
+      - ".github/workflows/build-batch-loader.yml"
+  pull_request:
+    paths:
+      - "jobs/gcs_to_bronze/**"
+      - ".github/workflows/build-batch-loader.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_digest_uri: ${{ steps.publish_digest.outputs.image_digest_uri }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build local container on PR or unconfigured template
+        if: github.event_name == 'pull_request' || vars.GCP_WIF_PROVIDER == '' || vars.ARTIFACT_REGISTRY_REPOSITORY == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: jobs/gcs_to_bronze
+          push: false
+          load: false
+
+      - name: Authenticate to Google Cloud via WIF
+        if: github.event_name != 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        if: github.event_name != 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Artifact Registry Docker credentials
+        if: github.event_name != 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+        run: |
+          registry_host="${ARTIFACT_REGISTRY_REPOSITORY%%/*}"
+          gcloud auth configure-docker "$registry_host" --quiet
+        env:
+          ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+
+      - name: Build and push immutable digest image
+        id: build_push
+        if: github.event_name != 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: jobs/gcs_to_bronze
+          push: true
+          tags: |
+            ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}/gcs-to-bronze:${{ github.sha }}
+
+      - name: Export immutable digest URI
+        id: publish_digest
+        if: github.event_name != 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+        run: |
+          digest_uri="${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}/gcs-to-bronze@${{ steps.build_push.outputs.digest }}"
+          echo "image_digest_uri=$digest_uri" >> "$GITHUB_OUTPUT"
+          echo "Published batch loader image: $digest_uri" >> "$GITHUB_STEP_SUMMARY"

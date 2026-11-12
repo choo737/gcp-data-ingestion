@@ -1,21 +1,84 @@
 variable "core_storage_project_id" {
   type        = string
+  default     = ""
   description = "Core Bronze and Silver storage project ID linked from gcp-foundation."
+}
+
+variable "core_project_id" {
+  type        = string
+  default     = ""
+  description = "Alias for core_storage_project_id linked from gcp-foundation."
 }
 
 variable "etl_compute_project_id" {
   type        = string
+  default     = ""
   description = "ETL compute project ID hosting Dataform, Workflows, Pub/Sub, and Cloud Run."
+}
+
+variable "compute_project_id" {
+  type        = string
+  default     = ""
+  description = "Alias for etl_compute_project_id linked from gcp-foundation."
 }
 
 variable "primary_gold_project_id" {
   type        = string
+  default     = ""
   description = "Primary Gold mart project ID hosting Dataplex scans."
+}
+
+variable "analytics_project_id" {
+  type        = string
+  default     = ""
+  description = "Alias for primary_gold_project_id linked from gcp-foundation."
+}
+
+variable "bi_project_id" {
+  type        = string
+  default     = ""
+  description = "Optional linked BI presentation project ID from gcp-foundation."
+}
+
+variable "governance_project_id" {
+  type        = string
+  default     = ""
+  description = "Optional linked governance project ID from gcp-foundation."
 }
 
 variable "bronze_dataset_id" {
   type        = string
   description = "Core Bronze BigQuery dataset ID linked from gcp-foundation."
+}
+
+variable "silver_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Optional linked Silver dataset ID from gcp-foundation."
+}
+
+variable "primary_gold_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Primary Gold mart dataset ID linked from gcp-foundation."
+}
+
+variable "gold_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Alias for primary_gold_dataset_id linked from gcp-foundation."
+}
+
+variable "quarantine_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Optional linked quarantine dataset ID from gcp-foundation."
+}
+
+variable "assertions_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Optional BigQuery assertions dataset ID passed to Dataform assertionSchema."
 }
 
 variable "landing_bucket_name" {
@@ -25,12 +88,13 @@ variable "landing_bucket_name" {
 
 variable "ops_telemetry_dataset_id" {
   type        = string
-  description = "Operational telemetry BigQuery dataset ID in etl_compute_project_id."
+  default     = ""
+  description = "Operational telemetry BigQuery dataset ID in compute project."
 }
 
 variable "dataform_repository_name" {
   type        = string
-  description = "Dataform repository short name in etl_compute_project_id."
+  description = "Dataform repository short name or path in compute project."
 }
 
 variable "dataform_release_config_name" {
@@ -39,10 +103,40 @@ variable "dataform_release_config_name" {
   description = "Dataform release configuration name linked from gcp-foundation."
 }
 
+variable "dataform_release_config_id" {
+  type        = string
+  default     = ""
+  description = "Dataform release configuration ID or path linked from gcp-foundation."
+}
+
+variable "dataform_git_commitish" {
+  type        = string
+  default     = "main"
+  description = "Git branch or commit used when compiling without releaseConfig."
+}
+
 variable "dataform_service_account_email" {
   type        = string
   default     = ""
   description = "Dataform ETL service account email linked from gcp-foundation."
+}
+
+variable "dataform_sa_email" {
+  type        = string
+  default     = ""
+  description = "Alias for dataform_service_account_email linked from gcp-foundation."
+}
+
+variable "batch_loader_sa_email" {
+  type        = string
+  default     = ""
+  description = "Optional pre-created batch loader service account email from gcp-foundation."
+}
+
+variable "pubsub_writer_sa_email" {
+  type        = string
+  default     = ""
+  description = "Optional Pub/Sub writer service account email granted topic publisher."
 }
 
 variable "dataplex_scan_names" {
@@ -51,16 +145,46 @@ variable "dataplex_scan_names" {
   description = "Map of Dataplex scan resource names linked from gcp-foundation."
 }
 
+variable "dataplex_profile_scan_id" {
+  type        = string
+  default     = ""
+  description = "Optional Dataplex profile scan resource ID linked from gcp-foundation."
+}
+
+variable "dataplex_quality_scan_id" {
+  type        = string
+  default     = ""
+  description = "Optional Dataplex auto data quality scan resource ID linked from gcp-foundation."
+}
+
 variable "kms_key_id" {
   type        = string
   default     = ""
   description = "Optional regional Cloud KMS key ID linked from gcp-foundation."
 }
 
+variable "kms_key_name" {
+  type        = string
+  default     = ""
+  description = "Alias for kms_key_id linked from gcp-foundation."
+}
+
+variable "pii_restricted_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog restricted PII policy tag ID for customer_ic_number."
+}
+
+variable "pii_masked_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog masked PII policy tag ID for customer_email."
+}
+
 variable "vpc_id" {
   type        = string
   default     = ""
-  description = "Optional VPC network resource ID for Datastream private connectivity."
+  description = "Optional VPC network resource ID for Direct VPC egress and Datastream."
 }
 
 variable "network_id" {
@@ -69,10 +193,57 @@ variable "network_id" {
   description = "Optional linked VPC network_id output from gcp-foundation security-network."
 }
 
+variable "subnet_id" {
+  type        = string
+  default     = ""
+  description = "Optional subnetwork resource ID for Cloud Run Direct VPC egress."
+}
+
+variable "batch_vpc_egress" {
+  type        = string
+  default     = "PRIVATE_RANGES_ONLY"
+  description = "Direct VPC egress mode for the batch loader: PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+
+  validation {
+    condition     = contains(["PRIVATE_RANGES_ONLY", "ALL_TRAFFIC"], var.batch_vpc_egress)
+    error_message = "batch_vpc_egress must be PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+  }
+}
+
+variable "artifact_registry_repository_uri" {
+  type        = string
+  default     = ""
+  description = "Optional Artifact Registry repository URI linked from gcp-foundation."
+}
+
+variable "batch_image_tag" {
+  type        = string
+  default     = ""
+  description = "Optional tag or @sha256 digest appended to artifact_registry_repository_uri."
+}
+
+variable "notification_channel_ids" {
+  type        = list(string)
+  default     = []
+  description = "Optional Cloud Monitoring notification channel IDs for workflow failure alerts."
+}
+
+variable "alert_email_addresses" {
+  type        = list(string)
+  default     = []
+  description = "Optional email addresses for same-project workflow failure alert channels."
+}
+
 variable "region" {
   type        = string
   default     = "asia-southeast1"
   description = "GCP region matching the upstream gcp-foundation deployment."
+}
+
+variable "environment" {
+  type        = string
+  default     = "dev"
+  description = "Target environment name (for example dev, staging, prod)."
 }
 
 variable "prefix" {
@@ -195,6 +366,12 @@ variable "datastream_network_attachment" {
   description = "PSC network attachment resource ID for Datastream private connectivity."
 }
 
+variable "datastream_network_attachment_id" {
+  type        = string
+  default     = ""
+  description = "Alias for datastream_network_attachment linked from gcp-foundation."
+}
+
 variable "datastream_peering_cidr" {
   type        = string
   default     = ""
@@ -240,8 +417,7 @@ variable "propagation_wait_seconds" {
 variable "labels" {
   type = map(string)
   default = {
-    environment = "enterprise"
-    managed_by  = "terraform"
+    managed_by = "terraform"
   }
   description = "Labels applied to enterprise ingestion resources."
 }

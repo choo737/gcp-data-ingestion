@@ -3,6 +3,12 @@ variable "project_id" {
   description = "GCP project ID hosting Datastream profiles, private connectivity, and streams."
 }
 
+variable "compute_project_id" {
+  type        = string
+  default     = ""
+  description = "Reservation-backed ETL compute project ID for BigQuery jobUser (defaults to project_id)."
+}
+
 variable "region" {
   type        = string
   default     = "asia-southeast1"

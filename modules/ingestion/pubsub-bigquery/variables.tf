@@ -100,6 +100,24 @@ variable "kms_key_id" {
   description = "Optional regional Cloud KMS crypto key ID for Pub/Sub topics and BigQuery tables."
 }
 
+variable "pii_restricted_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog policy tag ID applied to customer_ic_number."
+}
+
+variable "pii_masked_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog policy tag ID applied to customer_email."
+}
+
+variable "writer_service_account_email" {
+  type        = string
+  default     = ""
+  description = "Optional publisher service account email granted roles/pubsub.publisher on the primary topic."
+}
+
 variable "delete_contents_on_destroy" {
   type        = bool
   default     = false

@@ -1,15 +1,19 @@
-"""Idempotent GCS-to-BigQuery Bronze batch loader with watermark tracking."""
+"""Idempotent GCS-to-BigQuery Bronze batch loader with atomic watermark claiming."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import argparse
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import logging
 import os
+from pathlib import PurePosixPath
 import re
 import sys
+import time
 from typing import Any
+import uuid
 
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
@@ -18,6 +22,7 @@ from google.cloud import storage
 LOGGER = logging.getLogger("gcs_to_bronze")
 VALID_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
 VALID_BQ_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
+MAX_MERGE_RETRIES = 3
 
 SUPPORTED_SOURCE_FORMATS = {
     "CSV": bigquery.SourceFormat.CSV,
@@ -28,8 +33,11 @@ SUPPORTED_SOURCE_FORMATS = {
 WATERMARK_SCHEMA = [
     bigquery.SchemaField("gcs_uri", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("generation", "INT64", mode="REQUIRED"),
+    bigquery.SchemaField("status", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("claim_token", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("row_count", "INT64", mode="REQUIRED"),
     bigquery.SchemaField("job_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("claimed_at", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("loaded_at", "TIMESTAMP", mode="REQUIRED"),
 ]
 
@@ -40,7 +48,7 @@ class QuarantineError(RuntimeError):
 
 @dataclass(frozen=True)
 class LoaderConfig:
-    """Runtime configuration parsed from environment variables."""
+    """Runtime configuration parsed from environment variables or CLI flags."""
 
     bronze_project: str
     bronze_dataset: str
@@ -53,9 +61,12 @@ class LoaderConfig:
     quarantine_prefix: str = "quarantine/"
     watermark_table: str = "_ingestion_watermarks"
     fail_on_quarantine: bool = True
+    target_object: str = ""
+    watermark_lookback_days: int = 365
+    stale_claim_minutes: int = 30
 
     def __post_init__(self) -> None:
-        """Validate BigQuery project, dataset, and table identifiers against injection."""
+        """Validate BigQuery identifiers and runtime guardrails."""
         for label, proj in (
             ("bronze_project", self.bronze_project),
             ("execution_project", self.execution_project),
@@ -69,9 +80,17 @@ class LoaderConfig:
         ):
             if not VALID_BQ_IDENTIFIER_RE.fullmatch(ident):
                 raise ValueError(f"Invalid BigQuery identifier for {label}: {ident!r}")
+        if self.watermark_lookback_days < 0:
+            raise ValueError("watermark_lookback_days must be non-negative")
+        if self.stale_claim_minutes < 1:
+            raise ValueError("stale_claim_minutes must be at least 1")
+        if self.target_object:
+            parts = PurePosixPath(self.target_object.lstrip("/")).parts
+            if ".." in parts:
+                raise ValueError(f"Invalid target_object path traversal: {self.target_object!r}")
 
     @classmethod
-    def from_env(cls) -> "LoaderConfig":
+    def from_env(cls, target_object_override: str = "") -> "LoaderConfig":
         """Build configuration from required environment variables."""
         bronze_project = _require_env("BRONZE_PROJECT")
         bronze_dataset = _require_env("BRONZE_DATASET")
@@ -87,6 +106,10 @@ class LoaderConfig:
         watermark_table = os.environ.get("WATERMARK_TABLE", "_ingestion_watermarks").strip() or "_ingestion_watermarks"
         fail_raw = os.environ.get("FAIL_ON_QUARANTINE", "true").strip().lower()
         fail_on_quarantine = fail_raw in ("1", "true", "yes")
+        target_object_raw = target_object_override or os.environ.get("TARGET_OBJECT", "")
+        target_object = target_object_raw.strip().lstrip("/")
+        lookback_raw = os.environ.get("WATERMARK_LOOKBACK_DAYS", "365").strip() or "365"
+        stale_raw = os.environ.get("STALE_CLAIM_MINUTES", "30").strip() or "30"
         return cls(
             bronze_project=bronze_project,
             bronze_dataset=bronze_dataset,
@@ -99,6 +122,9 @@ class LoaderConfig:
             quarantine_prefix=quarantine_prefix,
             watermark_table=watermark_table,
             fail_on_quarantine=fail_on_quarantine,
+            target_object=target_object,
+            watermark_lookback_days=int(lookback_raw),
+            stale_claim_minutes=int(stale_raw),
         )
 
 
@@ -126,13 +152,26 @@ def _normalize_prefix(prefix: str) -> str:
     return cleaned
 
 
+def _relative_object_path(blob_name: str, source_prefix: str) -> str:
+    clean_name = blob_name.lstrip("/")
+    if source_prefix and clean_name.startswith(source_prefix):
+        rel = clean_name[len(source_prefix):].lstrip("/")
+        if rel:
+            return rel
+    return clean_name or blob_name.rsplit("/", 1)[-1]
+
+
 def ensure_watermark_table(
     bq_client: bigquery.Client,
     watermark_table_id: str,
     kms_key_id: str = "",
 ) -> None:
-    """Create the BigQuery watermark table when absent."""
+    """Create the DAY-partitioned BigQuery watermark table when absent."""
     table = bigquery.Table(watermark_table_id, schema=WATERMARK_SCHEMA)
+    table.time_partitioning = bigquery.TimePartitioning(
+        type_=bigquery.TimePartitioningType.DAY,
+        field="loaded_at",
+    )
     if kms_key_id:
         table.encryption_configuration = bigquery.EncryptionConfiguration(
             kms_key_name=kms_key_id,
@@ -143,16 +182,134 @@ def ensure_watermark_table(
 def fetch_loaded_watermarks(
     bq_client: bigquery.Client,
     watermark_table_id: str,
+    lookback_days: int = 365,
 ) -> set[tuple[str, int]]:
-    """Return already-loaded (gcs_uri, generation) pairs from BigQuery."""
-    query = f"SELECT gcs_uri, generation FROM `{watermark_table_id}`"
-    rows = bq_client.query(query).result()
+    """Return already-loaded (gcs_uri, generation) pairs with partition pruning."""
+    params: list[bigquery.ScalarQueryParameter] = []
+    if lookback_days > 0:
+        query = (
+            f"SELECT gcs_uri, generation FROM `{watermark_table_id}` "
+            "WHERE status = 'LOADED' "
+            "AND loaded_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)"
+        )
+        params.append(bigquery.ScalarQueryParameter("lookback_days", "INT64", int(lookback_days)))
+    else:
+        query = f"SELECT gcs_uri, generation FROM `{watermark_table_id}` WHERE status = 'LOADED'"
+    job_config = bigquery.QueryJobConfig(use_legacy_sql=False, query_parameters=params)
+    rows = bq_client.query(query, job_config=job_config).result()
     watermarks: set[tuple[str, int]] = set()
     for row in rows:
         uri = row["gcs_uri"] if isinstance(row, dict) else row.gcs_uri
         gen = row["generation"] if isinstance(row, dict) else row.generation
         watermarks.add((str(uri), int(gen)))
     return watermarks
+
+
+def claim_watermark(
+    bq_client: bigquery.Client,
+    watermark_table_id: str,
+    gcs_uri: str,
+    generation: int,
+    claim_token: str,
+    stale_claim_minutes: int = 30,
+) -> bool:
+    """Atomically claim (gcs_uri, generation) using BigQuery MERGE with stale recovery."""
+    query = (
+        f"MERGE `{watermark_table_id}` AS T "
+        "USING (SELECT @gcs_uri AS gcs_uri, @generation AS generation) AS S "
+        "ON T.gcs_uri = S.gcs_uri AND T.generation = S.generation "
+        "WHEN MATCHED AND T.status = 'IN_PROGRESS' "
+        "AND T.claimed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @stale_minutes MINUTE) THEN "
+        "UPDATE SET status = 'IN_PROGRESS', claim_token = @claim_token, "
+        "claimed_at = CURRENT_TIMESTAMP(), loaded_at = CURRENT_TIMESTAMP(), job_id = '' "
+        "WHEN NOT MATCHED THEN "
+        "INSERT (gcs_uri, generation, status, claim_token, row_count, job_id, claimed_at, loaded_at) "
+        "VALUES (S.gcs_uri, S.generation, 'IN_PROGRESS', @claim_token, 0, '', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())"
+    )
+    job_config = bigquery.QueryJobConfig(
+        use_legacy_sql=False,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("gcs_uri", "STRING", gcs_uri),
+            bigquery.ScalarQueryParameter("generation", "INT64", int(generation)),
+            bigquery.ScalarQueryParameter("claim_token", "STRING", claim_token),
+            bigquery.ScalarQueryParameter("stale_minutes", "INT64", int(stale_claim_minutes)),
+        ],
+    )
+
+    for attempt in range(MAX_MERGE_RETRIES):
+        try:
+            claim_job = bq_client.query(query, job_config=job_config)
+            claim_job.result()
+            affected = getattr(claim_job, "num_dml_affected_rows", None)
+            if isinstance(affected, int) and not isinstance(affected, bool):
+                return affected > 0
+            return True
+        except GoogleAPICallError as exc:
+            msg = str(exc).lower()
+            if ("serialize" in msg or "concurrent" in msg) and attempt + 1 < MAX_MERGE_RETRIES:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise
+    return False
+
+
+def complete_watermark(
+    bq_client: bigquery.Client,
+    watermark_table_id: str,
+    gcs_uri: str,
+    generation: int,
+    claim_token: str,
+    row_count: int,
+    job_id: str,
+) -> None:
+    """Promote an IN_PROGRESS watermark claim to LOADED after BigQuery load completes."""
+    query = (
+        f"UPDATE `{watermark_table_id}` "
+        "SET status = 'LOADED', "
+        "row_count = @row_count, "
+        "job_id = @job_id, "
+        "loaded_at = CURRENT_TIMESTAMP() "
+        "WHERE gcs_uri = @gcs_uri "
+        "AND generation = @generation "
+        "AND claim_token = @claim_token"
+    )
+    job_config = bigquery.QueryJobConfig(
+        use_legacy_sql=False,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("gcs_uri", "STRING", gcs_uri),
+            bigquery.ScalarQueryParameter("generation", "INT64", int(generation)),
+            bigquery.ScalarQueryParameter("claim_token", "STRING", claim_token),
+            bigquery.ScalarQueryParameter("row_count", "INT64", int(row_count)),
+            bigquery.ScalarQueryParameter("job_id", "STRING", job_id),
+        ],
+    )
+    bq_client.query(query, job_config=job_config).result()
+
+
+def release_watermark(
+    bq_client: bigquery.Client,
+    watermark_table_id: str,
+    gcs_uri: str,
+    generation: int,
+    claim_token: str,
+) -> None:
+    """Delete an IN_PROGRESS watermark claim when a load fails and moves to quarantine."""
+    query = (
+        f"DELETE FROM `{watermark_table_id}` "
+        "WHERE gcs_uri = @gcs_uri "
+        "AND generation = @generation "
+        "AND claim_token = @claim_token "
+        "AND status = 'IN_PROGRESS'"
+    )
+    job_config = bigquery.QueryJobConfig(
+        use_legacy_sql=False,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("gcs_uri", "STRING", gcs_uri),
+            bigquery.ScalarQueryParameter("generation", "INT64", int(generation)),
+            bigquery.ScalarQueryParameter("claim_token", "STRING", claim_token),
+        ],
+    )
+    bq_client.query(query, job_config=job_config).result()
 
 
 def table_exists(bq_client: bigquery.Client, table_id: str) -> bool:
@@ -179,6 +336,10 @@ def build_load_job_config(
         "write_disposition": bigquery.WriteDisposition.WRITE_APPEND,
         "autodetect": autodetect,
     }
+    if not autodetect:
+        kwargs["schema_update_options"] = [
+            bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
+        ]
     if source_format == "CSV":
         kwargs["skip_leading_rows"] = 1
     if kms_key_id:
@@ -188,42 +349,17 @@ def build_load_job_config(
     return bigquery.LoadJobConfig(**kwargs)
 
 
-def record_watermark(
-    bq_client: bigquery.Client,
-    watermark_table_id: str,
-    gcs_uri: str,
-    generation: int,
-    row_count: int,
-    job_id: str,
-) -> None:
-    """Insert an idempotent load watermark row using parameterized SQL."""
-    query = (
-        f"INSERT INTO `{watermark_table_id}` "
-        "(gcs_uri, generation, row_count, job_id, loaded_at) "
-        "VALUES (@gcs_uri, @generation, @row_count, @job_id, CURRENT_TIMESTAMP())"
-    )
-    job_config = bigquery.QueryJobConfig(
-        use_legacy_sql=False,
-        query_parameters=[
-            bigquery.ScalarQueryParameter("gcs_uri", "STRING", gcs_uri),
-            bigquery.ScalarQueryParameter("generation", "INT64", int(generation)),
-            bigquery.ScalarQueryParameter("row_count", "INT64", int(row_count)),
-            bigquery.ScalarQueryParameter("job_id", "STRING", job_id),
-        ],
-    )
-    bq_client.query(query, job_config=job_config).result()
-
-
 def quarantine_blob(
     bucket: Any,
     blob: Any,
     quarantine_prefix: str,
     gcs_uri: str,
     error_message: str,
+    source_prefix: str = "incoming/",
 ) -> str:
-    """Copy a failing source object plus error metadata into quarantine and delete the source."""
-    filename = blob.name.rsplit("/", 1)[-1]
-    quarantine_name = f"{quarantine_prefix}{filename}"
+    """Copy a failing object plus error metadata into quarantine while preserving relative paths."""
+    rel_path = _relative_object_path(blob.name, source_prefix)
+    quarantine_name = f"{quarantine_prefix}{rel_path}"
     bucket.copy_blob(blob, bucket, quarantine_name)
     error_payload = {
         "gcs_uri": gcs_uri,
@@ -241,12 +377,34 @@ def quarantine_blob(
     return f"gs://{bucket.name}/{quarantine_name}"
 
 
+def _resolve_target_blobs(
+    cfg: LoaderConfig,
+    gcs: storage.Client,
+    bucket: Any,
+) -> list[Any] | Any:
+    if not cfg.target_object:
+        return gcs.list_blobs(cfg.landing_bucket, prefix=cfg.source_prefix)
+
+    target = cfg.target_object.lstrip("/")
+    if target.endswith("/") or (cfg.quarantine_prefix and target.startswith(cfg.quarantine_prefix)):
+        LOGGER.info("Skipping non-ingestible target object %s", target)
+        return []
+    if cfg.source_prefix and not target.startswith(cfg.source_prefix):
+        LOGGER.info("Skipping target object %s outside source_prefix %s", target, cfg.source_prefix)
+        return []
+    blob = bucket.get_blob(target)
+    if blob is None:
+        LOGGER.warning("Target object gs://%s/%s no longer exists", cfg.landing_bucket, target)
+        return []
+    return [blob]
+
+
 def run_batch(
     config: LoaderConfig | None = None,
     bq_client: bigquery.Client | None = None,
     storage_client: storage.Client | None = None,
 ) -> BatchResult:
-    """Execute one incremental GCS-to-Bronze load pass with watermark deduplication."""
+    """Execute one incremental or single-object GCS-to-Bronze load pass."""
     cfg = config or LoaderConfig.from_env()
     bq = bq_client or bigquery.Client(project=cfg.execution_project)
     gcs = storage_client or storage.Client(project=cfg.execution_project)
@@ -255,11 +413,17 @@ def run_batch(
     watermark_table_id = f"{cfg.bronze_project}.{cfg.bronze_dataset}.{cfg.watermark_table}"
 
     ensure_watermark_table(bq, watermark_table_id, cfg.kms_key_id)
-    loaded_watermarks = fetch_loaded_watermarks(bq, watermark_table_id)
+    loaded_watermarks: set[tuple[str, int]] = set()
+    if not cfg.target_object:
+        loaded_watermarks = fetch_loaded_watermarks(
+            bq,
+            watermark_table_id,
+            lookback_days=cfg.watermark_lookback_days,
+        )
     target_exists = table_exists(bq, target_table_id)
 
     bucket = gcs.bucket(cfg.landing_bucket)
-    blobs = gcs.list_blobs(cfg.landing_bucket, prefix=cfg.source_prefix)
+    blobs = _resolve_target_blobs(cfg, gcs, bucket)
 
     loaded_files = 0
     skipped_files = 0
@@ -281,6 +445,19 @@ def run_batch(
             LOGGER.info("Skipping already loaded object %s (generation %s)", gcs_uri, generation)
             continue
 
+        claim_token = uuid.uuid4().hex
+        if not claim_watermark(
+            bq,
+            watermark_table_id,
+            gcs_uri=gcs_uri,
+            generation=generation,
+            claim_token=claim_token,
+            stale_claim_minutes=cfg.stale_claim_minutes,
+        ):
+            skipped_files += 1
+            LOGGER.info("Skipping object %s (generation %s) already claimed or loaded", gcs_uri, generation)
+            continue
+
         job_config = build_load_job_config(
             cfg.source_format,
             cfg.kms_key_id,
@@ -295,11 +472,12 @@ def run_batch(
             load_job.result()
             target_exists = True
             rows = int(load_job.output_rows or 0)
-            record_watermark(
+            complete_watermark(
                 bq,
                 watermark_table_id,
                 gcs_uri=gcs_uri,
                 generation=generation,
+                claim_token=claim_token,
                 row_count=rows,
                 job_id=str(load_job.job_id),
             )
@@ -321,7 +499,18 @@ def run_batch(
                 quarantine_prefix=cfg.quarantine_prefix,
                 gcs_uri=gcs_uri,
                 error_message=error_msg,
+                source_prefix=cfg.source_prefix,
             )
+            try:
+                release_watermark(
+                    bq,
+                    watermark_table_id,
+                    gcs_uri=gcs_uri,
+                    generation=generation,
+                    claim_token=claim_token,
+                )
+            except GoogleAPICallError as release_exc:
+                LOGGER.warning("Failed to release claim for %s: %s", gcs_uri, release_exc)
             quarantined_files += 1
             quarantine_errors.append(f"{gcs_uri} -> {quarantined_uri}: {error_msg}")
 
@@ -338,14 +527,28 @@ def run_batch(
     )
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Load GCS objects into BigQuery Bronze tables.")
+    parser.add_argument(
+        "--target-object",
+        default="",
+        help="Optional single GCS object key relative to the landing bucket.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for Cloud Run batch job executions."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    args = _parse_args(argv)
     try:
-        result = run_batch()
+        cfg = LoaderConfig.from_env(target_object_override=args.target_object)
+        if args.target_object and not cfg.target_object:
+            cfg = replace(cfg, target_object=args.target_object.strip().lstrip("/"))
+        result = run_batch(config=cfg)
     except Exception as exc:
         LOGGER.error("Batch ingestion job failed: %s", exc)
         return 1

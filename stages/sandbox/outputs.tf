@@ -52,3 +52,23 @@ output "telemetry_table_id" {
   value       = try(module.pipeline_workflows[0].telemetry_table_id, "")
   description = "Qualified BigQuery pipeline_runs telemetry table ID."
 }
+
+output "batch_target_table_id" {
+  value       = try(module.batch_elt_job[0].target_table_id, "")
+  description = "Qualified BigQuery Bronze batch target table ID when enabled."
+}
+
+output "workflow_service_account_email" {
+  value       = try(module.pipeline_workflows[0].workflow_service_account_email, "")
+  description = "Runtime service account email attached to Cloud Workflows."
+}
+
+output "trigger_service_account_email" {
+  value       = try(module.pipeline_workflows[0].trigger_service_account_email, "")
+  description = "Minimal invoker service account email used by Scheduler and Eventarc."
+}
+
+output "alert_policy_id" {
+  value       = try(module.pipeline_workflows[0].alert_policy_id, "")
+  description = "Cloud Monitoring alert policy ID when notification channels are set."
+}

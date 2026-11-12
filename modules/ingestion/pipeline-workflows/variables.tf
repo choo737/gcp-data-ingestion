@@ -3,10 +3,46 @@ variable "compute_project_id" {
   description = "GCP compute project ID hosting Cloud Workflows, Dataform, and ops telemetry."
 }
 
+variable "bronze_project_id" {
+  type        = string
+  default     = ""
+  description = "GCP project ID hosting Bronze BigQuery datasets (defaults to compute_project_id)."
+}
+
+variable "bronze_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Bronze BigQuery dataset ID passed into Dataform compilation vars."
+}
+
+variable "silver_project_id" {
+  type        = string
+  default     = ""
+  description = "GCP project ID hosting Silver BigQuery datasets (defaults to bronze or compute project)."
+}
+
+variable "silver_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Silver BigQuery dataset ID passed into Dataform compilation vars."
+}
+
 variable "gold_project_id" {
   type        = string
   default     = ""
-  description = "GCP project ID hosting Dataplex data scans (defaults to compute_project_id)."
+  description = "GCP project ID hosting Gold datasets and Dataplex data scans (defaults to compute_project_id)."
+}
+
+variable "gold_dataset_id" {
+  type        = string
+  default     = ""
+  description = "Gold BigQuery dataset ID passed into Dataform compilation vars."
+}
+
+variable "assertions_dataset_id" {
+  type        = string
+  default     = ""
+  description = "BigQuery dataset ID for Dataform assertions passed to compilation assertionSchema."
 }
 
 variable "region" {
@@ -27,13 +63,19 @@ variable "ops_telemetry_dataset_id" {
 
 variable "dataform_repository_name" {
   type        = string
-  description = "Dataform repository short name in compute_project_id."
+  description = "Dataform repository short name or resource path in compute_project_id."
 }
 
 variable "dataform_release_config_name" {
   type        = string
   default     = "prod-main"
-  description = "Dataform release configuration name (empty falls back to gitCommitish main)."
+  description = "Dataform release configuration name or path (empty falls back to gitCommitish)."
+}
+
+variable "dataform_git_commitish" {
+  type        = string
+  default     = "main"
+  description = "Git branch, tag, or commit SHA used when compiling without releaseConfig."
 }
 
 variable "dataform_service_account_email" {
@@ -48,6 +90,12 @@ variable "batch_job_name" {
   description = "Optional Cloud Run v2 batch job name or resource path triggered before Dataform."
 }
 
+variable "batch_source_prefix" {
+  type        = string
+  default     = "incoming/"
+  description = "Landing bucket prefix watched for batch files."
+}
+
 variable "default_run_batch_job" {
   type        = bool
   default     = false
@@ -57,13 +105,43 @@ variable "default_run_batch_job" {
 variable "dataplex_scan_name" {
   type        = string
   default     = ""
-  description = "Optional Dataplex data scan resource name triggered after Dataform succeeds."
+  description = "Optional Dataplex profile data scan resource name or ID."
+}
+
+variable "dataplex_quality_scan_name" {
+  type        = string
+  default     = ""
+  description = "Optional Dataplex auto data quality scan resource name or ID."
 }
 
 variable "default_run_dataplex_scan" {
   type        = bool
   default     = true
   description = "Default value for run_dataplex_scan when workflow input omits it."
+}
+
+variable "include_stream_orders" {
+  type        = bool
+  default     = true
+  description = "Whether Dataform compilation enables streaming Bronze orders models."
+}
+
+variable "include_batch_orders" {
+  type        = bool
+  default     = false
+  description = "Whether Dataform compilation enables batch Bronze orders models."
+}
+
+variable "pii_restricted_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog policy tag ID passed to Dataform compilation vars."
+}
+
+variable "pii_masked_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog policy tag ID passed to Dataform compilation vars."
 }
 
 variable "enable_schedule" {
@@ -112,6 +190,18 @@ variable "kms_key_id" {
   type        = string
   default     = ""
   description = "Optional regional Cloud KMS key ID for Workflow, Pub/Sub alerts, and telemetry table."
+}
+
+variable "notification_channel_ids" {
+  type        = list(string)
+  default     = []
+  description = "Optional Cloud Monitoring notification channel IDs for workflow failure alerts."
+}
+
+variable "alert_email_addresses" {
+  type        = list(string)
+  default     = []
+  description = "Optional email addresses for same-project Cloud Monitoring notification channels on workflow failures."
 }
 
 variable "delete_contents_on_destroy" {

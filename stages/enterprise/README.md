@@ -1,20 +1,21 @@
 # Enterprise Ingestion Stage
 
-This stage links upstream `gcp-foundation` enterprise outputs into multi-project ingestion tracks.
+This stage links upstream `gcp-foundation` outputs into multi-project ingestion tracks across `dev`, `staging`, and `prod`.
 
 ## Quickstart
 
 ```bash
-../../scripts/link-stages.sh \
+../../scripts/link-stages.sh --env dev \
   ../../../gcp-foundation/foundation/02-security-network \
   ../../../gcp-foundation/data/enterprise/01-platform \
   ../../../gcp-foundation/data/enterprise/02-governance-ops \
   .
-cp terraform.tfvars.example custom.auto.tfvars
-terraform init
-terraform plan
-terraform apply
+cp envs/dev.tfvars.example envs/dev.tfvars
+terraform init -backend-config="bucket=<tf-state-bucket>" -backend-config="prefix=ingestion/enterprise/dev"
+terraform plan -var-file=envs/dev.tfvars
+terraform apply -var-file=envs/dev.tfvars
 ```
 
-- Pull exported outputs across engineers with `./scripts/link-stages.sh --from-gcs gs://<bucket>/foundation-outputs.json stages/enterprise`.
-- Keep `delete_contents_on_destroy = false` in production environments.
+- Pull exported outputs per environment using `--env <env> --from-gcs gs://<bucket>/foundation-outputs.json`.
+- Pass `pii_restricted_policy_tag_id` and `pii_masked_policy_tag_id` so Bronze tables enforce column tags.
+- Keep `delete_contents_on_destroy = false` in `staging` and `prod` environments.

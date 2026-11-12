@@ -104,3 +104,56 @@ variable "labels" {
   default     = {}
   description = "Resource labels applied to the Cloud Run batch job."
 }
+
+variable "create_target_table" {
+  type        = bool
+  default     = true
+  description = "Pre-create the partitioned BigQuery Bronze target table with PII policy tags."
+}
+
+variable "target_table_schema_json" {
+  type        = string
+  default     = ""
+  description = "Optional custom BigQuery JSON schema for the pre-created target table."
+}
+
+variable "target_clustering" {
+  type        = list(string)
+  default     = ["order_status", "store_id"]
+  description = "Clustering columns applied to the partitioned Bronze batch table."
+}
+
+variable "pii_restricted_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog policy tag ID applied to customer_ic_number."
+}
+
+variable "pii_masked_policy_tag_id" {
+  type        = string
+  default     = ""
+  description = "Optional Data Catalog policy tag ID applied to customer_email."
+}
+
+variable "vpc_id" {
+  type        = string
+  default     = ""
+  description = "Optional VPC network resource ID or name for Direct VPC egress."
+}
+
+variable "subnet_id" {
+  type        = string
+  default     = ""
+  description = "Optional subnetwork resource ID or name for Direct VPC egress."
+}
+
+variable "vpc_egress" {
+  type        = string
+  default     = "PRIVATE_RANGES_ONLY"
+  description = "Cloud Run Direct VPC egress mode: PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+
+  validation {
+    condition     = contains(["PRIVATE_RANGES_ONLY", "ALL_TRAFFIC"], var.vpc_egress)
+    error_message = "vpc_egress must be PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+  }
+}

@@ -4,19 +4,47 @@ main:
     - init:
         assign:
           - empty_map: {}
+          - empty_list: []
           - raw_input: '${default(input, empty_map)}'
+          - medallion_targets: '${json.decode(sys.get_env("MEDALLION_TARGETS_JSON"))}'
+          - dataform_vars: '${json.decode(sys.get_env("DATAFORM_COMPILATION_VARS_JSON"))}'
           - compute_project: '${sys.get_env("COMPUTE_PROJECT_ID")}'
+          - bronze_project: '${default(map.get(medallion_targets, "BRONZE_PROJECT_ID"), "")}'
+          - bronze_dataset: '${default(map.get(medallion_targets, "BRONZE_DATASET_ID"), "")}'
+          - silver_project: '${default(map.get(medallion_targets, "SILVER_PROJECT_ID"), "")}'
+          - silver_dataset: '${default(map.get(medallion_targets, "SILVER_DATASET_ID"), "")}'
+          - gold_project: '${default(map.get(medallion_targets, "GOLD_PROJECT_ID"), "")}'
+          - gold_dataset: '${default(map.get(medallion_targets, "GOLD_DATASET_ID"), "")}'
+          - assertions_dataset: '${default(map.get(medallion_targets, "ASSERTIONS_DATASET_ID"), "")}'
+          - region: '${sys.get_env("REGION")}'
           - dataform_repo_path: '${sys.get_env("DATAFORM_REPO_PATH")}'
           - dataform_release_config: '${sys.get_env("DATAFORM_RELEASE_CONFIG")}'
+          - dataform_git_commitish: '${sys.get_env("DATAFORM_GIT_COMMITISH")}'
           - batch_job_name: '${sys.get_env("BATCH_JOB_NAME")}'
-          - dataplex_scan_name: '${sys.get_env("DATAPLEX_SCAN_NAME")}'
+          - batch_source_prefix: '${sys.get_env("BATCH_SOURCE_PREFIX")}'
+          - dataplex_scan_id: '${sys.get_env("DATAPLEX_SCAN_ID")}'
+          - dataplex_quality_scan_id: '${sys.get_env("DATAPLEX_QUALITY_SCAN_ID")}'
           - ops_telemetry_dataset: '${sys.get_env("OPS_TELEMETRY_DATASET")}'
           - alert_pubsub_topic: '${sys.get_env("ALERT_PUBSUB_TOPIC")}'
+          - include_stream_orders: '${default(map.get(dataform_vars, "INCLUDE_STREAM_ORDERS"), "false")}'
+          - include_batch_orders: '${default(map.get(dataform_vars, "INCLUDE_BATCH_ORDERS"), "false")}'
+          - pii_restricted_policy_tag: '${default(map.get(dataform_vars, "PII_RESTRICTED_POLICY_TAG"), "")}'
+          - pii_masked_policy_tag: '${default(map.get(dataform_vars, "PII_MASKED_POLICY_TAG"), "")}'
+          - allow_untagged_pii: '${default(map.get(dataform_vars, "ALLOW_UNTAGGED_PII"), "true")}'
           - workspace_id: '${default(map.get(raw_input, "workspace_id"), "")}'
+          - target_object: '${default(map.get(raw_input, "target_object"), default(map.get(raw_input, ["data", "name"]), default(map.get(raw_input, ["data", "message", "attributes", "objectId"]), "")))}'
           - run_batch_job: '${default(map.get(raw_input, "run_batch_job"), sys.get_env("DEFAULT_RUN_BATCH_JOB") == "true")}'
           - run_dataplex_scan: '${default(map.get(raw_input, "run_dataplex_scan"), sys.get_env("DEFAULT_RUN_DATAPLEX_SCAN") == "true")}'
-          - included_tags: '${default(map.get(raw_input, "included_tags"), [])}'
+          - included_tags: '${default(map.get(raw_input, "included_tags"), empty_list)}'
           - execution_id: '${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}'
+          - max_polls: 120
+          - poll_interval_seconds: 10
+          - batch_poll_count: 0
+          - dataform_poll_count: 0
+          - dataplex_poll_count: 0
+          - dataplex_scan_idx: 0
+          - dataplex_scans: '${empty_list}'
+          - dataplex_job_names: '${empty_list}'
           - compilation_name: ""
           - invocation_name: ""
           - batch_op_name: ""
@@ -27,10 +55,38 @@ main:
         switch:
           - condition: '${not text.match_regex(compute_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
             raise: "Invalid COMPUTE_PROJECT_ID environment configuration"
-          - condition: '${len(ops_telemetry_dataset) > 1024 or not text.match_regex(ops_telemetry_dataset, "^[A-Za-z_][A-Za-z0-9_]*$")}'
+          - condition: '${bronze_project != "" and not text.match_regex(bronze_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid BRONZE_PROJECT_ID environment configuration"
+          - condition: '${silver_project != "" and not text.match_regex(silver_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid SILVER_PROJECT_ID environment configuration"
+          - condition: '${gold_project != "" and not text.match_regex(gold_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid GOLD_PROJECT_ID environment configuration"
+          - condition: '${bronze_dataset != "" and (len(bronze_dataset) > 128 or not text.match_regex(bronze_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid BRONZE_DATASET_ID environment configuration"
+          - condition: '${silver_dataset != "" and (len(silver_dataset) > 128 or not text.match_regex(silver_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid SILVER_DATASET_ID environment configuration"
+          - condition: '${gold_dataset != "" and (len(gold_dataset) > 128 or not text.match_regex(gold_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid GOLD_DATASET_ID environment configuration"
+          - condition: '${assertions_dataset != "" and (len(assertions_dataset) > 128 or not text.match_regex(assertions_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid ASSERTIONS_DATASET_ID environment configuration"
+          - condition: '${len(region) > 64 or not text.match_regex(region, "^[a-z]+-[a-z0-9-]+$")}'
+            raise: "Invalid REGION environment configuration"
+          - condition: '${len(ops_telemetry_dataset) > 128 or not text.match_regex(ops_telemetry_dataset, "^[A-Za-z_][A-Za-z0-9_]*$")}'
             raise: "Invalid OPS_TELEMETRY_DATASET environment configuration"
-          - condition: '${workspace_id != "" and not text.match_regex(workspace_id, "^[A-Za-z0-9_-]{1,128}$")}'
+          - condition: '${len(dataform_repo_path) > 512 or not text.match_regex(dataform_repo_path, "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/[a-z0-9-]+/repositories/[A-Za-z0-9_-]+$")}'
+            raise: "Invalid DATAFORM_REPO_PATH environment configuration"
+          - condition: '${workspace_id != "" and (len(workspace_id) > 128 or not text.match_regex(workspace_id, "^[A-Za-z0-9_-]+$"))}'
             raise: "Invalid workspace_id execution argument"
+          - condition: '${target_object != "" and (len(target_object) > 512 or text.match_regex(target_object, "(^|/)\\.\\.(/|$)"))}'
+            raise: "Invalid target_object execution argument"
+
+    - ignore_quarantine_events:
+        switch:
+          - condition: '${target_object != "" and text.match_regex(target_object, "^quarantine/")}'
+            return:
+              status: "IGNORED_QUARANTINE_OBJECT"
+              execution_id: '${execution_id}'
+              target_object: '${target_object}'
 
     - run_pipeline:
         try:
@@ -42,12 +98,26 @@ main:
                       - set_batch_stage:
                           assign:
                             - failure_stage: "batch_elt_job"
+                      - build_batch_run_body:
+                          switch:
+                            - condition: '${target_object != ""}'
+                              assign:
+                                - batch_run_body:
+                                    overrides:
+                                      containerOverrides:
+                                        - env:
+                                            - name: "TARGET_OBJECT"
+                                              value: '${target_object}'
+                            - condition: '${true}'
+                              assign:
+                                - batch_run_body: '${empty_map}'
                       - trigger_batch_job:
                           call: http.post
                           args:
                             url: '${"https://run.googleapis.com/v2/" + batch_job_name + ":run"}'
                             auth:
                               type: OAuth2
+                            body: '${batch_run_body}'
                           result: batch_op
                       - save_batch_op:
                           assign:
@@ -63,10 +133,17 @@ main:
                           switch:
                             - condition: '${not default(map.get(batch_status.body, "done"), false)}'
                               steps:
+                                - check_batch_timeout:
+                                    switch:
+                                      - condition: '${batch_poll_count >= max_polls}'
+                                        raise: '${"Timed out waiting for Cloud Run batch job " + batch_op_name}'
+                                - increment_batch_poll:
+                                    assign:
+                                      - batch_poll_count: '${batch_poll_count + 1}'
                                 - sleep_batch:
                                     call: sys.sleep
                                     args:
-                                      seconds: 5
+                                      seconds: '${poll_interval_seconds}'
                                     next: poll_batch_job
                             - condition: '${"error" in batch_status.body}'
                               raise:
@@ -80,31 +157,111 @@ main:
             - compile_dataform:
                 assign:
                   - failure_stage: "compile_dataform"
+                  - effective_commitish: "main"
+                  - effective_release_config: ""
+                  - compilation_vars:
+                      include_stream_orders: '${include_stream_orders}'
+                      include_batch_orders: '${include_batch_orders}'
+                      pii_restricted_policy_tag: '${pii_restricted_policy_tag}'
+                      pii_masked_policy_tag: '${pii_masked_policy_tag}'
+                      allow_untagged_pii: '${allow_untagged_pii}'
+            - resolve_dataform_commitish:
+                switch:
+                  - condition: '${dataform_git_commitish != ""}'
+                    assign:
+                      - effective_commitish: '${dataform_git_commitish}'
+            - resolve_dataform_release_config:
+                switch:
+                  - condition: '${dataform_release_config != "" and text.match_regex(dataform_release_config, "^projects/")}'
+                    assign:
+                      - effective_release_config: '${dataform_release_config}'
+                  - condition: '${dataform_release_config != ""}'
+                    assign:
+                      - effective_release_config: '${dataform_repo_path + "/releaseConfigs/" + dataform_release_config}'
+            - set_bronze_project_var:
+                switch:
+                  - condition: '${bronze_project != ""}'
+                    assign:
+                      - compilation_vars["bronze_project"]: '${bronze_project}'
+            - set_bronze_dataset_var:
+                switch:
+                  - condition: '${bronze_dataset != ""}'
+                    assign:
+                      - compilation_vars["bronze_dataset"]: '${bronze_dataset}'
+            - set_silver_project_var:
+                switch:
+                  - condition: '${silver_project != ""}'
+                    assign:
+                      - compilation_vars["silver_project"]: '${silver_project}'
+            - set_silver_dataset_var:
+                switch:
+                  - condition: '${silver_dataset != ""}'
+                    assign:
+                      - compilation_vars["silver_dataset"]: '${silver_dataset}'
+            - set_gold_project_var:
+                switch:
+                  - condition: '${gold_project != ""}'
+                    assign:
+                      - compilation_vars["gold_project"]: '${gold_project}'
+            - set_gold_dataset_var:
+                switch:
+                  - condition: '${gold_dataset != ""}'
+                    assign:
+                      - compilation_vars["gold_dataset"]: '${gold_dataset}'
+            - build_code_compilation_config:
+                switch:
+                  - condition: '${silver_project != "" and assertions_dataset != ""}'
+                    assign:
+                      - code_compilation_config:
+                          defaultDatabase: '${silver_project}'
+                          assertionSchema: '${assertions_dataset}'
+                          vars: '${compilation_vars}'
+                  - condition: '${silver_project != ""}'
+                    assign:
+                      - code_compilation_config:
+                          defaultDatabase: '${silver_project}'
+                          vars: '${compilation_vars}'
+                  - condition: '${assertions_dataset != ""}'
+                    assign:
+                      - code_compilation_config:
+                          assertionSchema: '${assertions_dataset}'
+                          vars: '${compilation_vars}'
+                  - condition: '${true}'
+                    assign:
+                      - code_compilation_config:
+                          vars: '${compilation_vars}'
             - build_compilation_payload:
                 switch:
                   - condition: '${workspace_id != ""}'
                     assign:
                       - compile_body:
                           workspace: '${dataform_repo_path + "/workspaces/" + workspace_id}'
-                  - condition: '${dataform_release_config != ""}'
+                          codeCompilationConfig: '${code_compilation_config}'
+                  - condition: '${(include_stream_orders == "true" or include_batch_orders == "true") and effective_commitish != ""}'
                     assign:
                       - compile_body:
-                          releaseConfig: '${dataform_release_config}'
+                          gitCommitish: '${effective_commitish}'
+                          codeCompilationConfig: '${code_compilation_config}'
+                  - condition: '${effective_release_config != ""}'
+                    assign:
+                      - compile_body:
+                          releaseConfig: '${effective_release_config}'
                   - condition: '${true}'
                     assign:
                       - compile_body:
-                          gitCommitish: "main"
+                          gitCommitish: '${effective_commitish}'
+                          codeCompilationConfig: '${code_compilation_config}'
             - create_compilation:
                 call: http.post
                 args:
-                  url: '${"https://dataform.googleapis.com/v1beta1/" + dataform_repo_path + "/compilationResults"}'
+                  url: '${"https://dataform.googleapis.com/v1/" + dataform_repo_path + "/compilationResults"}'
                   auth:
                     type: OAuth2
                   body: '${compile_body}'
                 result: comp
             - check_compilation_errors:
                 switch:
-                  - condition: '${len(default(map.get(comp.body, "compilationErrors"), [])) > 0}'
+                  - condition: '${len(default(map.get(comp.body, "compilationErrors"), empty_list)) > 0}'
                     raise:
                       message: "Dataform compilation returned SQLX errors"
                       errors: '${comp.body.compilationErrors}'
@@ -131,7 +288,7 @@ main:
             - start_invocation:
                 call: http.post
                 args:
-                  url: '${"https://dataform.googleapis.com/v1beta1/" + dataform_repo_path + "/workflowInvocations"}'
+                  url: '${"https://dataform.googleapis.com/v1/" + dataform_repo_path + "/workflowInvocations"}'
                   auth:
                     type: OAuth2
                   body:
@@ -144,43 +301,84 @@ main:
             - poll_invocation:
                 call: http.get
                 args:
-                  url: '${"https://dataform.googleapis.com/v1beta1/" + invocation_name}'
+                  url: '${"https://dataform.googleapis.com/v1/" + invocation_name}'
                   auth:
                     type: OAuth2
                 result: inv_status
             - check_invocation_state:
                 switch:
-                  - condition: '${inv_status.body.state == "SUCCEEDED"}'
-                    next: maybe_run_dataplex
-                  - condition: '${inv_status.body.state == "FAILED" or inv_status.body.state == "CANCELLED"}'
+                  - condition: '${default(map.get(inv_status.body, "state"), "") == "SUCCEEDED"}'
+                    next: prepare_dataplex_scans
+                  - condition: '${default(map.get(inv_status.body, "state"), "") == "FAILED" or default(map.get(inv_status.body, "state"), "") == "CANCELLED"}'
                     raise:
-                      message: '${"Dataform workflow invocation ended with state " + inv_status.body.state}'
+                      message: '${"Dataform workflow invocation ended with state " + default(map.get(inv_status.body, "state"), "UNKNOWN")}'
                       invocation: '${invocation_name}'
+                  - condition: '${dataform_poll_count >= max_polls}'
+                    raise: '${"Timed out waiting for Dataform workflow invocation " + invocation_name}'
                   - condition: '${true}'
                     steps:
+                      - increment_dataform_poll:
+                          assign:
+                            - dataform_poll_count: '${dataform_poll_count + 1}'
                       - sleep_dataform:
                           call: sys.sleep
                           args:
-                            seconds: 5
+                            seconds: '${poll_interval_seconds}'
                           next: poll_invocation
+
+            - prepare_dataplex_scans:
+                switch:
+                  - condition: '${gold_project != ""}'
+                    assign:
+                      - target_gold_project: '${gold_project}'
+                  - condition: '${true}'
+                    assign:
+                      - target_gold_project: '${compute_project}'
+            - add_profile_scan:
+                switch:
+                  - condition: '${dataplex_scan_id != "" and text.match_regex(dataplex_scan_id, "^projects/")}'
+                    assign:
+                      - dataplex_scans: '${list.concat(dataplex_scans, dataplex_scan_id)}'
+                  - condition: '${dataplex_scan_id != ""}'
+                    assign:
+                      - dataplex_scans: '${list.concat(dataplex_scans, "projects/" + target_gold_project + "/locations/" + region + "/dataScans/" + dataplex_scan_id)}'
+            - add_quality_scan:
+                switch:
+                  - condition: '${dataplex_quality_scan_id != "" and text.match_regex(dataplex_quality_scan_id, "^projects/")}'
+                    assign:
+                      - quality_resource: '${dataplex_quality_scan_id}'
+                  - condition: '${dataplex_quality_scan_id != ""}'
+                    assign:
+                      - quality_resource: '${"projects/" + target_gold_project + "/locations/" + region + "/dataScans/" + dataplex_quality_scan_id}'
+                  - condition: '${true}'
+                    assign:
+                      - quality_resource: ""
+            - append_quality_scan:
+                switch:
+                  - condition: '${quality_resource != "" and not (quality_resource in dataplex_scans)}'
+                    assign:
+                      - dataplex_scans: '${list.concat(dataplex_scans, quality_resource)}'
 
             - maybe_run_dataplex:
                 switch:
-                  - condition: '${run_dataplex_scan == true and dataplex_scan_name != ""}'
+                  - condition: '${run_dataplex_scan == true and dataplex_scan_idx < len(dataplex_scans)}'
                     steps:
                       - set_dataplex_stage:
                           assign:
                             - failure_stage: "dataplex_scan"
+                            - current_scan_name: '${dataplex_scans[dataplex_scan_idx]}'
+                            - dataplex_poll_count: 0
                       - trigger_dataplex:
                           call: http.post
                           args:
-                            url: '${"https://dataplex.googleapis.com/v1/" + dataplex_scan_name + ":run"}'
+                            url: '${"https://dataplex.googleapis.com/v1/" + current_scan_name + ":run"}'
                             auth:
                               type: OAuth2
                           result: scan_resp
                       - save_dataplex_job:
                           assign:
                             - dataplex_job_name: '${scan_resp.body.job.name}'
+                            - dataplex_job_names: '${list.concat(dataplex_job_names, dataplex_job_name)}'
                       - poll_dataplex:
                           call: http.get
                           args:
@@ -190,18 +388,27 @@ main:
                           result: scan_status
                       - check_dataplex_state:
                           switch:
-                            - condition: '${scan_status.body.state == "SUCCEEDED"}'
-                              next: record_telemetry
-                            - condition: '${scan_status.body.state == "FAILED" or scan_status.body.state == "CANCELLED" or scan_status.body.state == "ABORTED"}'
+                            - condition: '${default(map.get(scan_status.body, "state"), "") == "SUCCEEDED"}'
+                              steps:
+                                - advance_dataplex_scan:
+                                    assign:
+                                      - dataplex_scan_idx: '${dataplex_scan_idx + 1}'
+                                    next: maybe_run_dataplex
+                            - condition: '${default(map.get(scan_status.body, "state"), "") == "FAILED" or default(map.get(scan_status.body, "state"), "") == "CANCELLED" or default(map.get(scan_status.body, "state"), "") == "ABORTED"}'
                               raise:
-                                message: '${"Dataplex scan failed with state " + scan_status.body.state}'
+                                message: '${"Dataplex scan failed with state " + default(map.get(scan_status.body, "state"), "UNKNOWN")}'
                                 job: '${dataplex_job_name}'
+                            - condition: '${dataplex_poll_count >= max_polls}'
+                              raise: '${"Timed out waiting for Dataplex scan job " + dataplex_job_name}'
                             - condition: '${true}'
                               steps:
+                                - increment_dataplex_poll:
+                                    assign:
+                                      - dataplex_poll_count: '${dataplex_poll_count + 1}'
                                 - sleep_dataplex:
                                     call: sys.sleep
                                     args:
-                                      seconds: 5
+                                      seconds: '${poll_interval_seconds}'
                                     next: poll_dataplex
 
             - record_telemetry:
@@ -249,6 +456,7 @@ main:
                   invocation_name: '${invocation_name}'
                   batch_op_name: '${batch_op_name}'
                   dataplex_job_name: '${dataplex_job_name}'
+                  dataplex_job_names: '${dataplex_job_names}'
 
         except:
           as: err

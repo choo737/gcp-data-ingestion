@@ -17,3 +17,12 @@ output "service_account_email" {
   value       = google_service_account.batch_loader.email
   description = "Dedicated service account email attached to the batch loader job."
 }
+
+output "target_table_id" {
+  value = (
+    var.create_target_table
+    ? "${var.bronze_project_id}.${var.bronze_dataset_id}.${google_bigquery_table.target[0].table_id}"
+    : "${var.bronze_project_id}.${var.bronze_dataset_id}.${var.target_table}"
+  )
+  description = "Qualified BigQuery Bronze batch target table ID."
+}
