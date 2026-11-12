@@ -1,0 +1,9 @@
+# Replace placeholder IDs inside untracked custom.auto.tfvars, never inside tracked files.
+project_id                 = "example-sandbox-project"
+region                     = "asia-southeast1"
+prefix                     = "bqfnd"
+enable_pubsub_stream       = true
+enable_batch_job           = false
+enable_datastream_cdc      = false
+enable_pipeline_workflow   = true
+delete_contents_on_destroy = false

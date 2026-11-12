@@ -1,0 +1,316 @@
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - raw_input: '${default(input, {})}'
+          - compute_project: '${sys.get_env("COMPUTE_PROJECT_ID")}'
+          - dataform_repo_path: '${sys.get_env("DATAFORM_REPO_PATH")}'
+          - dataform_release_config: '${sys.get_env("DATAFORM_RELEASE_CONFIG")}'
+          - batch_job_name: '${sys.get_env("BATCH_JOB_NAME")}'
+          - dataplex_scan_name: '${sys.get_env("DATAPLEX_SCAN_NAME")}'
+          - ops_telemetry_dataset: '${sys.get_env("OPS_TELEMETRY_DATASET")}'
+          - alert_pubsub_topic: '${sys.get_env("ALERT_PUBSUB_TOPIC")}'
+          - workspace_id: '${default(map.get(raw_input, "workspace_id"), "")}'
+          - run_batch_job: '${default(map.get(raw_input, "run_batch_job"), sys.get_env("DEFAULT_RUN_BATCH_JOB") == "true")}'
+          - run_dataplex_scan: '${default(map.get(raw_input, "run_dataplex_scan"), sys.get_env("DEFAULT_RUN_DATAPLEX_SCAN") == "true")}'
+          - included_tags: '${default(map.get(raw_input, "included_tags"), [])}'
+          - execution_id: '${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}'
+          - compilation_name: ""
+          - invocation_name: ""
+          - batch_op_name: ""
+          - dataplex_job_name: ""
+          - failure_stage: "init"
+
+    - validate_identifiers:
+        switch:
+          - condition: '${not text.match_regex(compute_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid COMPUTE_PROJECT_ID environment configuration"
+          - condition: '${not text.match_regex(ops_telemetry_dataset, "^[A-Za-z_][A-Za-z0-9_]{0,1023}$")}'
+            raise: "Invalid OPS_TELEMETRY_DATASET environment configuration"
+          - condition: '${workspace_id != "" and not text.match_regex(workspace_id, "^[A-Za-z0-9_-]{1,128}$")}'
+            raise: "Invalid workspace_id execution argument"
+
+    - run_pipeline:
+        try:
+          steps:
+            - maybe_run_batch_job:
+                switch:
+                  - condition: '${run_batch_job == true and batch_job_name != ""}'
+                    steps:
+                      - set_batch_stage:
+                          assign:
+                            - failure_stage: "batch_elt_job"
+                      - trigger_batch_job:
+                          call: http.post
+                          args:
+                            url: '${"https://run.googleapis.com/v2/" + batch_job_name + ":run"}'
+                            auth:
+                              type: OAuth2
+                          result: batch_op
+                      - save_batch_op:
+                          assign:
+                            - batch_op_name: '${batch_op.body.name}'
+                      - poll_batch_job:
+                          call: http.get
+                          args:
+                            url: '${"https://run.googleapis.com/v2/" + batch_op_name}'
+                            auth:
+                              type: OAuth2
+                          result: batch_status
+                      - check_batch_done:
+                          switch:
+                            - condition: '${not default(batch_status.body.done, false)}'
+                              steps:
+                                - sleep_batch:
+                                    call: sys.sleep
+                                    args:
+                                      seconds: 5
+                                    next: poll_batch_job
+                            - condition: '${"error" in batch_status.body}'
+                              raise:
+                                message: "Cloud Run batch job returned operation error"
+                                detail: '${batch_status.body.error}'
+                            - condition: '${default(map.get(default(batch_status.body.response, {}), "failedCount"), 0) > 0}'
+                              raise:
+                                message: "Cloud Run batch job completed with failed tasks"
+                                detail: '${batch_status.body.response}'
+
+            - compile_dataform:
+                assign:
+                  - failure_stage: "compile_dataform"
+            - build_compilation_payload:
+                switch:
+                  - condition: '${workspace_id != ""}'
+                    assign:
+                      - compile_body:
+                          workspace: '${dataform_repo_path + "/workspaces/" + workspace_id}'
+                  - condition: '${dataform_release_config != ""}'
+                    assign:
+                      - compile_body:
+                          releaseConfig: '${dataform_release_config}'
+                  - condition: '${true}'
+                    assign:
+                      - compile_body:
+                          gitCommitish: "main"
+            - create_compilation:
+                call: http.post
+                args:
+                  url: '${"https://dataform.googleapis.com/v1beta1/" + dataform_repo_path + "/compilationResults"}'
+                  auth:
+                    type: OAuth2
+                  body: '${compile_body}'
+                result: comp
+            - check_compilation_errors:
+                switch:
+                  - condition: '${len(default(comp.body.compilationErrors, [])) > 0}'
+                    raise:
+                      message: "Dataform compilation returned SQLX errors"
+                      errors: '${comp.body.compilationErrors}'
+            - save_compilation_name:
+                assign:
+                  - compilation_name: '${comp.body.name}'
+
+            - invoke_dataform:
+                assign:
+                  - failure_stage: "invoke_dataform"
+            - build_invocation_config:
+                switch:
+                  - condition: '${len(included_tags) > 0}'
+                    assign:
+                      - invocation_config:
+                          transitiveDependenciesIncluded: true
+                          fullyRefreshIncrementalTablesEnabled: false
+                          includedTags: '${included_tags}'
+                  - condition: '${true}'
+                    assign:
+                      - invocation_config:
+                          transitiveDependenciesIncluded: true
+                          fullyRefreshIncrementalTablesEnabled: false
+            - start_invocation:
+                call: http.post
+                args:
+                  url: '${"https://dataform.googleapis.com/v1beta1/" + dataform_repo_path + "/workflowInvocations"}'
+                  auth:
+                    type: OAuth2
+                  body:
+                    compilationResult: '${compilation_name}'
+                    invocationConfig: '${invocation_config}'
+                result: inv_resp
+            - save_invocation_name:
+                assign:
+                  - invocation_name: '${inv_resp.body.name}'
+            - poll_invocation:
+                call: http.get
+                args:
+                  url: '${"https://dataform.googleapis.com/v1beta1/" + invocation_name}'
+                  auth:
+                    type: OAuth2
+                result: inv_status
+            - check_invocation_state:
+                switch:
+                  - condition: '${inv_status.body.state == "SUCCEEDED"}'
+                    next: maybe_run_dataplex
+                  - condition: '${inv_status.body.state == "FAILED" or inv_status.body.state == "CANCELLED"}'
+                    raise:
+                      message: '${"Dataform workflow invocation ended with state " + inv_status.body.state}'
+                      invocation: '${invocation_name}'
+                  - condition: '${true}'
+                    steps:
+                      - sleep_dataform:
+                          call: sys.sleep
+                          args:
+                            seconds: 5
+                          next: poll_invocation
+
+            - maybe_run_dataplex:
+                switch:
+                  - condition: '${run_dataplex_scan == true and dataplex_scan_name != ""}'
+                    steps:
+                      - set_dataplex_stage:
+                          assign:
+                            - failure_stage: "dataplex_scan"
+                      - trigger_dataplex:
+                          call: http.post
+                          args:
+                            url: '${"https://dataplex.googleapis.com/v1/" + dataplex_scan_name + ":run"}'
+                            auth:
+                              type: OAuth2
+                          result: scan_resp
+                      - save_dataplex_job:
+                          assign:
+                            - dataplex_job_name: '${scan_resp.body.job.name}'
+                      - poll_dataplex:
+                          call: http.get
+                          args:
+                            url: '${"https://dataplex.googleapis.com/v1/" + dataplex_job_name}'
+                            auth:
+                              type: OAuth2
+                          result: scan_status
+                      - check_dataplex_state:
+                          switch:
+                            - condition: '${scan_status.body.state == "SUCCEEDED"}'
+                              next: record_telemetry
+                            - condition: '${scan_status.body.state == "FAILED" or scan_status.body.state == "CANCELLED" or scan_status.body.state == "ABORTED"}'
+                              raise:
+                                message: '${"Dataplex scan failed with state " + scan_status.body.state}'
+                                job: '${dataplex_job_name}'
+                            - condition: '${true}'
+                              steps:
+                                - sleep_dataplex:
+                                    call: sys.sleep
+                                    args:
+                                      seconds: 5
+                                    next: poll_dataplex
+
+            - record_telemetry:
+                assign:
+                  - failure_stage: "record_telemetry"
+
+            - insert_success_row:
+                call: http.post
+                args:
+                  url: '${"https://bigquery.googleapis.com/bigquery/v2/projects/" + compute_project + "/queries"}'
+                  auth:
+                    type: OAuth2
+                  body:
+                    useLegacySql: false
+                    parameterMode: "NAMED"
+                    query: '${"INSERT INTO `" + compute_project + "." + ops_telemetry_dataset + ".pipeline_runs` (execution_id, status, compilation_name, invocation_name, recorded_at) VALUES (@execution_id, @status, @compilation_name, @invocation_name, CURRENT_TIMESTAMP())"}'
+                    queryParameters:
+                      - name: "execution_id"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: '${execution_id}'
+                      - name: "status"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: "SUCCEEDED"
+                      - name: "compilation_name"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: '${compilation_name}'
+                      - name: "invocation_name"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: '${invocation_name}'
+                result: bq_telemetry_resp
+
+            - finish:
+                return:
+                  status: "SUCCEEDED"
+                  execution_id: '${execution_id}'
+                  compilation_name: '${compilation_name}'
+                  invocation_name: '${invocation_name}'
+                  batch_op_name: '${batch_op_name}'
+                  dataplex_job_name: '${dataplex_job_name}'
+
+        except:
+          as: err
+          steps:
+            - record_failure_telemetry:
+                try:
+                  steps:
+                    - insert_failure_row:
+                        call: http.post
+                        args:
+                          url: '${"https://bigquery.googleapis.com/bigquery/v2/projects/" + compute_project + "/queries"}'
+                          auth:
+                            type: OAuth2
+                          body:
+                            useLegacySql: false
+                            parameterMode: "NAMED"
+                            query: '${"INSERT INTO `" + compute_project + "." + ops_telemetry_dataset + ".pipeline_runs` (execution_id, status, compilation_name, invocation_name, recorded_at) VALUES (@execution_id, @status, @compilation_name, @invocation_name, CURRENT_TIMESTAMP())"}'
+                            queryParameters:
+                              - name: "execution_id"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: '${execution_id}'
+                              - name: "status"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: "FAILED"
+                              - name: "compilation_name"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: '${compilation_name}'
+                              - name: "invocation_name"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: '${invocation_name}'
+                except:
+                  as: telemetry_err
+                  steps:
+                    - log_telemetry_err:
+                        call: sys.log
+                        args:
+                          data: '${json.encode_to_string(telemetry_err)}'
+                          severity: "WARNING"
+            - alert_and_fail:
+                assign:
+                  - alert_payload:
+                      execution_id: '${execution_id}'
+                      status: "FAILED"
+                      stage: '${failure_stage}'
+                      compilation_name: '${compilation_name}'
+                      invocation_name: '${invocation_name}'
+                      error: '${err}'
+            - publish_alert:
+                call: http.post
+                args:
+                  url: '${"https://pubsub.googleapis.com/v1/" + alert_pubsub_topic + ":publish"}'
+                  auth:
+                    type: OAuth2
+                  body:
+                    messages:
+                      - data: '${base64.encode(json.encode(alert_payload))}'
+            - raise_pipeline_error:
+                raise: '${err}'

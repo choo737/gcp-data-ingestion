@@ -1,0 +1,5 @@
+# Default platform reviewers for ingestion modules, pipelines, and stages.
+/modules/ingestion/ @example-org/data-platform-leads
+/workflows/ @example-org/data-platform-leads
+/jobs/ @example-org/data-engineering-leads
+/stages/ @example-org/data-platform-leads

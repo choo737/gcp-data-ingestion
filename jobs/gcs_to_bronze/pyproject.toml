@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gcs-to-bronze-loader"
+version = "0.1.0"
+description = "Idempotent GCS-to-BigQuery Bronze batch loader with watermark deduplication and quarantine routing."
+requires-python = ">=3.13"
+dependencies = [
+    "google-cloud-bigquery==3.47.0",
+    "google-cloud-storage==3.17.1",
+]
