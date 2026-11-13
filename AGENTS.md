@@ -11,15 +11,16 @@ This repository holds Terraform modules, runnable stages, batch loader code, and
 - `workflows/medallion_pipeline.workflows.yaml`: Parameterized Cloud Workflows GA `v1` pipeline definition.
 - `composer_reference/medallion_composer3_dag.py`: Reference Airflow DAG for Cloud Composer 3 migrations.
 - `scripts/link-stages.sh`: Links local or GCS `gcp-foundation` outputs (`--env`) into `00_linked.auto.tfvars.json`.
+- `QUESTIONNAIRE.md`: Greenfield, Brownfield, and Sandbox intake questionnaire (standalone or via `platform-context.json`).
 
 ## Interactive Setup Protocol
 
 Always load `.agents/skills/setup-data-ingestion/SKILL.md` before deploying this repository for a customer.
 
 1. **Create a private repo first**: Never fork publicly; run `gh repo create --private` and verify `isPrivate`.
-2. **Ask the user first**: Never guess project IDs, dataset IDs, KMS keys, database hosts, or secrets.
+2. **Collect intake inputs**: Check `platform-context.json` from [gcp-launchpad](https://github.com/choo737/gcp-launchpad) or walk through `QUESTIONNAIRE.md`.
 3. **Verify GCP auth**: Check `gcloud config get-value account` or `GOOGLE_OAUTH_ACCESS_TOKEN`.
-4. **Link upstream foundation outputs**: Run `scripts/link-stages.sh --env <env>` to generate gitignored `00_linked.auto.tfvars.json`.
+4. **Link Greenfield or Brownfield outputs**: Run `scripts/link-stages.sh --env <env>` or generate `00_linked.auto.tfvars.json` for Brownfield.
 5. **Write inputs safely**: Save custom overrides in gitignored `custom.auto.tfvars` and passwords only in Secret Manager.
 6. **Verify live ingestion**: Test Pub/Sub happy path, DLQ quarantine routing, and Cloud Workflows `pipeline_runs` telemetry.
 

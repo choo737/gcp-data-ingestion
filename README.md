@@ -56,6 +56,8 @@ make apply STAGE=enterprise ENV=prod
 
 - Pass local stage directories to `scripts/link-stages.sh` when running all repositories on one machine.
 - `scripts/link-stages.sh` filters declared variables and writes `00_linked.auto.tfvars.json` (`0600`).
+- For Brownfield accounts without `gcp-foundation`, follow [QUESTIONNAIRE.md](QUESTIONNAIRE.md) to populate `00_linked.auto.tfvars.json`.
+- You can also import `platform-context.json` from [gcp-launchpad](https://github.com/choo737/gcp-launchpad) via `generate-brownfield-link.py`.
 - Commit `.terraform.lock.hcl` for `linux_amd64` and `darwin_arm64` in both stages.
 
 ## CI/CD Workflows
@@ -84,5 +86,6 @@ make test
 
 ## Documentation Index
 
+- [Intake Questionnaire (Greenfield and Brownfield)](QUESTIONNAIRE.md)
 - [Ingestion Decision Guide](docs/01-ingestion-decision-guide.md)
 - [Repository Scaling and Composer Guide](docs/02-repo-scaling-and-composer.md)

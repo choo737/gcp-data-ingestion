@@ -808,6 +808,70 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertRegex(ci, r"hashicorp/setup-terraform@[0-9a-f]{40}")
         self.assertRegex(ci, r"actions/setup-python@[0-9a-f]{40}")
 
+    def test_questionnaire_and_brownfield_doc_alignment(self) -> None:
+        questionnaire_path = REPO_ROOT / "QUESTIONNAIRE.md"
+        self.assertTrue(questionnaire_path.is_file(), "Missing QUESTIONNAIRE.md")
+        q_text = questionnaire_path.read_text(encoding="utf-8")
+
+        required_q_tokens = (
+            "https://github.com/choo737/gcp-launchpad",
+            "platform-context.json",
+            "link-stages.sh",
+            "generate-brownfield-link.py",
+            "00_linked.auto.tfvars.json",
+            "core_project_id",
+            "compute_project_id",
+            "analytics_project_id",
+            "bronze_dataset_id",
+            "silver_dataset_id",
+            "gold_dataset_id",
+            "quarantine_dataset_id",
+            "landing_bucket_name",
+            "dataform_repository_name",
+            "kms_key_id",
+            "vpc_id",
+            "subnet_id",
+            "pii_restricted_policy_tag_id",
+            "pii_masked_policy_tag_id",
+            "enable_datastream_cdc",
+            "enable_pubsub_stream",
+            "enable_batch_job",
+            "batch_vpc_egress",
+            "PRIVATE_RANGES_ONLY",
+            "ALL_TRAFFIC",
+            "schedule_cron",
+            "schedule_time_zone",
+            "Asia/Kuala_Lumpur",
+            "delete_contents_on_destroy",
+            "alert_email_addresses",
+            "notification_channel_ids",
+        )
+        for token in required_q_tokens:
+            self.assertIn(token, q_text, f"QUESTIONNAIRE.md missing {token}")
+
+        doc_paths = (
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "AGENTS.md",
+            REPO_ROOT / "CLAUDE.md",
+            REPO_ROOT / "GEMINI.md",
+            REPO_ROOT / ".agents/skills/setup-data-ingestion/SKILL.md",
+        )
+        for doc_path in doc_paths:
+            doc_text = doc_path.read_text(encoding="utf-8")
+            rel = str(doc_path.relative_to(REPO_ROOT))
+            for ref in (
+                "QUESTIONNAIRE.md",
+                "platform-context.json",
+                "https://github.com/choo737/gcp-launchpad",
+            ):
+                self.assertIn(ref, doc_text, f"{rel} missing {ref}")
+
+        gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("platform-context.json", gitignore)
+        self.assertIn(".cm_project", gitignore)
+        self.assertIn(".codemender/", gitignore)
+        self.assertNotIn(".terraform.lock.hcl", gitignore)
+
 
 if __name__ == "__main__":
     unittest.main()

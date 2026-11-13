@@ -25,19 +25,24 @@ Confirm the final command prints `true`.
 
 Never guess project IDs, dataset names, KMS keys, or database credentials.
 
-Ask the customer to select one stage and environment:
+Check for an optional `platform-context.json` handoff file from [gcp-launchpad](https://github.com/choo737/gcp-launchpad) first.
 
-1. **Sandbox (`stages/sandbox/`)**: Single GCP project matching `gcp-foundation/data/sandbox`.
-2. **Enterprise (`stages/enterprise/`)**: Multi-project layout with `envs/{dev,staging,prod}.tfvars.example`.
+Walk through [QUESTIONNAIRE.md](../../../QUESTIONNAIRE.md) with the customer to confirm stage, tracks, networking, and schedule inputs.
 
-Confirm these inputs before editing `envs/<env>.tfvars` or `custom.auto.tfvars`:
+Ask the customer to select one deployment mode and stage:
+
+1. **Greenfield Enterprise (`stages/enterprise/`)**: Multi-project layout linked to `gcp-foundation` via `scripts/link-stages.sh`.
+2. **Brownfield Enterprise (`stages/enterprise/`)**: Multi-project layout linked to existing VPC, KMS, and BigQuery IDs.
+3. **Single-Project Sandbox (`stages/sandbox/`)**: Single GCP project matching `gcp-foundation/data/sandbox` or standalone setup.
+
+Confirm these inputs before editing `envs/<env>.tfvars`, `terraform.tfvars`, or `custom.auto.tfvars`:
 
 - `environment`, `region` (default `asia-southeast1`), `prefix`, and `delete_contents_on_destroy`.
 - Active tracks: `enable_pubsub_stream`, `enable_batch_job`, `enable_datastream_cdc`, `enable_pipeline_workflow`.
 - Batch image digest URI (`batch_container_image`) and `batch_vpc_egress` when `enable_batch_job = true`.
 - Secret Manager version (`datastream_db_password_secret_version`) and PSC or peering inputs when `enable_datastream_cdc = true`.
 
-## Step 2: Link Upstream Foundation Outputs and Check Auth
+## Step 2: Link Upstream Foundation or Brownfield Outputs
 
 Verify active `gcloud` credentials before running Terraform:
 
@@ -51,7 +56,7 @@ For named `gcloud` configurations without ADC, export a short-lived access token
 export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token --configuration=<config_name>)
 ```
 
-Link outputs from local `gcp-foundation` stages or from GCS into `00_linked.auto.tfvars.json`:
+For Greenfield deployments, link outputs from `gcp-foundation` stages or GCS into `00_linked.auto.tfvars.json`:
 
 ```bash
 # Local single-project sandbox linking:
@@ -67,6 +72,11 @@ Link outputs from local `gcp-foundation` stages or from GCS into `00_linked.auto
 # Or pull environment outputs exported earlier to GCS:
 ./scripts/link-stages.sh --env dev --from-gcs gs://<outputs-bucket>/foundation-outputs.json stages/enterprise
 ```
+
+For Brownfield deployments without `gcp-foundation`, generate `stages/enterprise/00_linked.auto.tfvars.json` from existing customer IDs:
+
+- Run `gcp-launchpad/scripts/generate-brownfield-link.py` against `platform-context.json`, or write `00_linked.auto.tfvars.json` directly.
+- Include required fields (`core_project_id`, `compute_project_id`, `bronze_dataset_id`, `landing_bucket_name`, `dataform_repository_name`) plus optional VPC/KMS IDs.
 
 Write customer overrides only into gitignored `custom.auto.tfvars` or untracked `envs/<env>.tfvars`.
 
