@@ -29,8 +29,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  pull-requests: read
 
 jobs:
   validate:
@@ -45,60 +43,21 @@ jobs:
           terraform_version: "1.8.5"
           terraform_wrapper: false
 
-      - name: Check formatting and validate stages
+      - name: Check formatting and validate stages (offline on PRs)
         run: |
           make fmt-check
           make validate
-
-  plan-pr:
-    needs: validate
-    if: github.event_name == 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.TF_STATE_BUCKET != ''
-    environment: dev
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Authenticate to Google Cloud via WIF
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-
-      - name: Set up Google Cloud SDK
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
-        with:
-          terraform_version: "1.8.5"
-          terraform_wrapper: false
-
-      - name: Link foundation outputs when configured
-        if: vars.IAC_OUTPUTS_BUCKET != ''
-        run: |
-          ./scripts/link-stages.sh --env dev \
-            --from-gcs "gs://${{ vars.IAC_OUTPUTS_BUCKET }}/foundation-outputs.json" \
-            stages/enterprise
-
-      - name: Terraform init and plan
-        run: |
-          terraform -chdir=stages/enterprise init -reconfigure \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="prefix=ingestion/enterprise/dev"
-          if [ -f stages/enterprise/envs/dev.tfvars ]; then
-            terraform -chdir=stages/enterprise plan -var-file=envs/dev.tfvars
-          else
-            terraform -chdir=stages/enterprise plan
-          fi
 
   apply-dev:
     needs: validate
     if: |
       vars.GCP_WIF_PROVIDER != '' && vars.TF_STATE_BUCKET != '' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev'))
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AUTO_DEPLOY_DEV == 'true') || (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev'))
     environment: dev
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -120,15 +79,27 @@ jobs:
 
       - name: Link foundation outputs when configured
         if: vars.IAC_OUTPUTS_BUCKET != ''
+        env:
+          IAC_OUTPUTS_BUCKET: ${{ vars.IAC_OUTPUTS_BUCKET }}
         run: |
+          if [[ ! "${IAC_OUTPUTS_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid IAC_OUTPUTS_BUCKET" >&2
+            exit 1
+          fi
           ./scripts/link-stages.sh --env dev \
-            --from-gcs "gs://${{ vars.IAC_OUTPUTS_BUCKET }}/foundation-outputs.json" \
+            --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
             stages/enterprise
 
       - name: Terraform init and apply (dev)
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
+          if [[ ! "${TF_STATE_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid TF_STATE_BUCKET" >&2
+            exit 1
+          fi
           terraform -chdir=stages/enterprise init -reconfigure \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
             -backend-config="prefix=ingestion/enterprise/dev"
           if [ -f stages/enterprise/envs/dev.tfvars ]; then
             terraform -chdir=stages/enterprise apply -auto-approve -var-file=envs/dev.tfvars
@@ -137,13 +108,18 @@ jobs:
           fi
 
   apply-staging:
-    needs: apply-dev
+    needs:
+      - validate
+      - apply-dev
     if: |
-      always() && (needs.apply-dev.result == 'success' || needs.apply-dev.result == 'skipped') &&
+      always() && needs.validate.result == 'success' &&
       vars.GCP_WIF_PROVIDER != '' && vars.TF_STATE_BUCKET != '' &&
-      ((github.event_name == 'push' && vars.AUTO_PROMOTE_STAGING == 'true') || (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'))
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AUTO_PROMOTE_STAGING == 'true' && needs.apply-dev.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'))
     environment: staging
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -165,15 +141,27 @@ jobs:
 
       - name: Link foundation outputs when configured
         if: vars.IAC_OUTPUTS_BUCKET != ''
+        env:
+          IAC_OUTPUTS_BUCKET: ${{ vars.IAC_OUTPUTS_BUCKET }}
         run: |
+          if [[ ! "${IAC_OUTPUTS_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid IAC_OUTPUTS_BUCKET" >&2
+            exit 1
+          fi
           ./scripts/link-stages.sh --env staging \
-            --from-gcs "gs://${{ vars.IAC_OUTPUTS_BUCKET }}/foundation-outputs.json" \
+            --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
             stages/enterprise
 
       - name: Terraform init and apply (staging)
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
+          if [[ ! "${TF_STATE_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid TF_STATE_BUCKET" >&2
+            exit 1
+          fi
           terraform -chdir=stages/enterprise init -reconfigure \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
             -backend-config="prefix=ingestion/enterprise/staging"
           if [ -f stages/enterprise/envs/staging.tfvars ]; then
             terraform -chdir=stages/enterprise apply -auto-approve -var-file=envs/staging.tfvars
@@ -182,13 +170,16 @@ jobs:
           fi
 
   apply-prod:
-    needs: apply-staging
+    needs: validate
     if: |
-      always() && (needs.apply-staging.result == 'success' || needs.apply-staging.result == 'skipped') &&
+      needs.validate.result == 'success' &&
       vars.GCP_WIF_PROVIDER != '' && vars.TF_STATE_BUCKET != '' &&
       github.event_name == 'workflow_dispatch' && inputs.environment == 'prod'
     environment: prod
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -210,15 +201,27 @@ jobs:
 
       - name: Link foundation outputs when configured
         if: vars.IAC_OUTPUTS_BUCKET != ''
+        env:
+          IAC_OUTPUTS_BUCKET: ${{ vars.IAC_OUTPUTS_BUCKET }}
         run: |
+          if [[ ! "${IAC_OUTPUTS_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid IAC_OUTPUTS_BUCKET" >&2
+            exit 1
+          fi
           ./scripts/link-stages.sh --env prod \
-            --from-gcs "gs://${{ vars.IAC_OUTPUTS_BUCKET }}/foundation-outputs.json" \
+            --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
             stages/enterprise
 
       - name: Terraform init and apply (prod)
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
+          if [[ ! "${TF_STATE_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid TF_STATE_BUCKET" >&2
+            exit 1
+          fi
           terraform -chdir=stages/enterprise init -reconfigure \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
             -backend-config="prefix=ingestion/enterprise/prod"
           if [ -f stages/enterprise/envs/prod.tfvars ]; then
             terraform -chdir=stages/enterprise apply -auto-approve -var-file=envs/prod.tfvars
