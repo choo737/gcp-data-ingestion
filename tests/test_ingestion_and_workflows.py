@@ -784,10 +784,11 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             self.assertIsNotNone(match)
             self.assertEqual(match.group(1), skill)
 
-        for doc_name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+        for doc_name in ("AGENTS.md", "CLAUDE.md"):
             content = (REPO_ROOT / doc_name).read_text(encoding="utf-8")
             for ref in ("modules/ingestion/", "stages/", "00_linked.auto.tfvars.json", "setup-data-ingestion", "--private"):
                 self.assertIn(ref, content, f"{doc_name} missing {ref}")
+        self.assertFalse((REPO_ROOT / "GEMINI.md").exists(), "GEMINI.md must not exist")
 
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("ENV ?= dev", makefile)
@@ -853,7 +854,6 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             REPO_ROOT / "README.md",
             REPO_ROOT / "AGENTS.md",
             REPO_ROOT / "CLAUDE.md",
-            REPO_ROOT / "GEMINI.md",
             REPO_ROOT / ".agents/skills/setup-data-ingestion/SKILL.md",
         )
         for doc_path in doc_paths:
