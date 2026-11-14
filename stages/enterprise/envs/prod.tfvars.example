@@ -16,3 +16,39 @@ enable_schedule             = true
 schedule_cron               = "0 2 * * *"
 enable_gcs_eventarc_trigger = true
 delete_contents_on_destroy  = false
+
+# Multi-pipeline catalog: keep all enterprise ingestion feeds in one project without editing main.tf.
+# enable_shared_datastream_private_connection = true
+#
+# pubsub_streams = {
+#   crm-events = {
+#     target_table_id          = "crm_events_stream"
+#     schema_type              = "PROTOCOL_BUFFER"
+#     schema_file              = "schemas/pubsub/crm_events.proto"
+#     target_table_schema_file = "schemas/bigquery/crm_events_bronze.json"
+#     target_clustering        = ["segment", "event_type"]
+#   }
+# }
+#
+# batch_jobs = {
+#   erp-invoices = {
+#     source_prefix            = "incoming/erp_invoices/"
+#     target_table             = "erp_invoices_bronze"
+#     source_format            = "NEWLINE_DELIMITED_JSON"
+#     partition_field          = "invoice_date"
+#     target_clustering        = ["entity_code", "invoice_status"]
+#     target_table_schema_file = "schemas/bigquery/erp_invoices_bronze.json"
+#   }
+# }
+#
+# datastream_streams = {
+#   erp-db = {
+#     source_engine              = "POSTGRESQL"
+#     db_host                    = "10.20.2.15"
+#     db_username                = "datastream_rep"
+#     db_database                = "erp_prod"
+#     db_password_secret_version = "projects/example-etl-project/secrets/ent-erp-db-pwd/versions/1"
+#     included_objects           = { public = ["invoices", "vendors"] }
+#     cdc_mode                   = "APPEND_ONLY"
+#   }
+# }

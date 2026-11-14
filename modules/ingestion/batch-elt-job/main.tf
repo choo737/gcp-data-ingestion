@@ -1,6 +1,15 @@
 locals {
-  sa_account_id                = trimsuffix(substr(lower("${replace(var.prefix, "_", "-")}-batch-loader"), 0, 30), "-")
+  default_sa_account_id        = trimsuffix(substr(lower("${replace(var.prefix, "_", "-")}-batch-loader"), 0, 30), "-")
+  raw_sa_slug                  = join("-", regexall("[a-z0-9]+", lower("${var.prefix}-${var.job_suffix}")))
+  prefixed_sa_slug             = can(regex("^[a-z]", local.raw_sa_slug)) ? local.raw_sa_slug : "sa-${local.raw_sa_slug}"
+  padded_sa_slug               = length(local.prefixed_sa_slug) >= 6 ? local.prefixed_sa_slug : "${local.prefixed_sa_slug}-loader"
+  derived_sa_account_id        = trimsuffix(substr(local.padded_sa_slug, 0, 28), "-")
+  sa_account_id                = var.job_suffix == "gcs-to-bronze" ? local.default_sa_account_id : local.derived_sa_account_id
   job_name                     = trimsuffix(substr(lower(replace("${var.prefix}-${var.job_suffix}", "_", "-")), 0, 63), "-")
+  effective_existing_sa        = var.service_account_email != null ? trimspace(var.service_account_email) : ""
+  effective_sa_email           = local.effective_existing_sa != "" ? local.effective_existing_sa : google_service_account.batch_loader[0].email
+  effective_sa_member          = "serviceAccount:${local.effective_sa_email}"
+  effective_partition_field    = var.partition_field != null ? trimspace(var.partition_field) : ""
   effective_kms_key_id         = var.kms_key_id != null ? trimspace(var.kms_key_id) : ""
   effective_vpc_id             = var.vpc_id != null ? trimspace(var.vpc_id) : ""
   effective_subnet_id          = var.subnet_id != null ? trimspace(var.subnet_id) : ""
@@ -43,29 +52,31 @@ locals {
 }
 
 resource "google_service_account" "batch_loader" {
+  count = local.effective_existing_sa == "" ? 1 : 0
+
   project      = var.compute_project_id
   account_id   = local.sa_account_id
-  display_name = "${var.prefix} Batch Loader"
+  display_name = var.job_suffix == "gcs-to-bronze" ? "${var.prefix} Batch Loader" : "${var.prefix} ${var.job_suffix} Loader"
   description  = "Dedicated least-privilege service account for Cloud Run GCS-to-Bronze loads."
 }
 
 resource "google_storage_bucket_iam_member" "landing_objects" {
   bucket = var.landing_bucket_name
   role   = "roles/storage.objectUser"
-  member = google_service_account.batch_loader.member
+  member = local.effective_sa_member
 }
 
 resource "google_bigquery_dataset_iam_member" "bronze_editor" {
   project    = var.bronze_project_id
   dataset_id = var.bronze_dataset_id
   role       = "roles/bigquery.dataEditor"
-  member     = google_service_account.batch_loader.member
+  member     = local.effective_sa_member
 }
 
 resource "google_project_iam_member" "compute_job_user" {
   project = var.compute_project_id
   role    = "roles/bigquery.jobUser"
-  member  = google_service_account.batch_loader.member
+  member  = local.effective_sa_member
 }
 
 resource "google_kms_crypto_key_iam_member" "batch_loader_cmek" {
@@ -73,7 +84,7 @@ resource "google_kms_crypto_key_iam_member" "batch_loader_cmek" {
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
-  member        = google_service_account.batch_loader.member
+  member        = local.effective_sa_member
 }
 
 resource "google_bigquery_table" "target" {
@@ -90,7 +101,7 @@ resource "google_bigquery_table" "target" {
 
   time_partitioning {
     type  = "DAY"
-    field = "order_date"
+    field = local.effective_partition_field != "" ? local.effective_partition_field : null
   }
 
   dynamic "encryption_configuration" {
@@ -115,7 +126,7 @@ resource "google_cloud_run_v2_job" "this" {
     task_count  = 1
 
     template {
-      service_account = google_service_account.batch_loader.email
+      service_account = local.effective_sa_email
       max_retries     = var.max_retries
       timeout         = var.timeout
       encryption_key  = local.effective_kms_key_id != "" ? local.effective_kms_key_id : null

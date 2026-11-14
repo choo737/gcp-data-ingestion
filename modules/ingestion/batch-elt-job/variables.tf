@@ -35,6 +35,12 @@ variable "job_suffix" {
   description = "Suffix appended to the Cloud Run job name."
 }
 
+variable "service_account_email" {
+  type        = string
+  default     = ""
+  description = "Optional existing service account email reused instead of creating a new account."
+}
+
 variable "container_image" {
   type        = string
   description = "Artifact Registry container image URI built from jobs/gcs_to_bronze."
@@ -115,6 +121,12 @@ variable "target_table_schema_json" {
   type        = string
   default     = ""
   description = "Optional custom BigQuery JSON schema for the pre-created target table."
+}
+
+variable "partition_field" {
+  type        = string
+  default     = "order_date"
+  description = "DATE or TIMESTAMP column for DAY partitioning; empty uses ingestion-time partitioning."
 }
 
 variable "target_clustering" {

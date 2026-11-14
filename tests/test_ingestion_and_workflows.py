@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -659,7 +660,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertIn("_ingested_at", batch_main)
         self.assertIn("_cdc_sequence_num", batch_main)
         self.assertIn("_op_type", batch_main)
-        self.assertIn('field = "order_date"', batch_main)
+        self.assertIn("field = local.effective_partition_field != \"\" ? local.effective_partition_field : null", batch_main)
         self.assertIn("parallelism = 1", batch_main)
         self.assertIn("vpc_access", batch_main)
         self.assertIn("network_interfaces", batch_main)
@@ -772,6 +773,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
     def test_agent_docs_skills_makefile_and_ci(self) -> None:
         required_skills = (
             "setup-data-ingestion",
+            "add-batch-feed",
             "add-cdc-source",
             "add-streaming-topic",
             "split-domain-ingestion",
@@ -871,6 +873,219 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertIn(".cm_project", gitignore)
         self.assertIn(".codemender/", gitignore)
         self.assertNotIn(".terraform.lock.hcl", gitignore)
+
+    def test_batch_elt_job_multi_feed_sa_and_partition_field(self) -> None:
+        batch_vars = (REPO_ROOT / "modules/ingestion/batch-elt-job/variables.tf").read_text(encoding="utf-8")
+        batch_main = (REPO_ROOT / "modules/ingestion/batch-elt-job/main.tf").read_text(encoding="utf-8")
+        batch_outs = (REPO_ROOT / "modules/ingestion/batch-elt-job/outputs.tf").read_text(encoding="utf-8")
+
+        self.assertIn('variable "partition_field"', batch_vars)
+        self.assertIn('default     = "order_date"', batch_vars)
+        self.assertIn('variable "service_account_email"', batch_vars)
+
+        self.assertIn("count = local.effective_existing_sa == \"\" ? 1 : 0", batch_main)
+        self.assertIn("local.default_sa_account_id : local.derived_sa_account_id", batch_main)
+        self.assertIn("substr(local.padded_sa_slug, 0, 28)", batch_main)
+        self.assertIn("member = local.effective_sa_member", batch_main)
+        self.assertIn("service_account = local.effective_sa_email", batch_main)
+        self.assertIn("field = local.effective_partition_field != \"\" ? local.effective_partition_field : null", batch_main)
+        self.assertIn("value       = local.effective_sa_email", batch_outs)
+
+    def test_enterprise_multi_pipeline_maps_schemas_and_adoption_guide(self) -> None:
+        ent_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
+        ent_main = (REPO_ROOT / "stages/enterprise/main.tf").read_text(encoding="utf-8")
+        ent_outs = (REPO_ROOT / "stages/enterprise/outputs.tf").read_text(encoding="utf-8")
+
+        for var_name in (
+            "pubsub_streams",
+            "batch_jobs",
+            "datastream_streams",
+            "enable_shared_datastream_private_connection",
+            "shared_datastream_private_connection_id",
+        ):
+            self.assertIn(f'variable "{var_name}"', ent_vars)
+
+        for out_name in (
+            "additional_pubsub_topics",
+            "additional_batch_jobs",
+            "additional_datastream_streams",
+            "shared_datastream_private_connection_id",
+        ):
+            self.assertIn(f'output "{out_name}"', ent_outs)
+
+        self.assertIn('resource "google_datastream_private_connection" "shared"', ent_main)
+        self.assertIn('module "pubsub_streams"', ent_main)
+        self.assertIn('module "batch_jobs"', ent_main)
+        self.assertIn('module "datastream_streams"', ent_main)
+        self.assertIn("local.any_pubsub_enabled", ent_main)
+        self.assertIn("local.any_batch_enabled", ent_main)
+        self.assertIn("local.any_datastream_enabled", ent_main)
+
+        schemas_readme = REPO_ROOT / "schemas/README.md"
+        proto_path = REPO_ROOT / "schemas/pubsub/crm_events.proto"
+        crm_json_path = REPO_ROOT / "schemas/bigquery/crm_events_bronze.json"
+        erp_json_path = REPO_ROOT / "schemas/bigquery/erp_invoices_bronze.json"
+        for p in (schemas_readme, proto_path, crm_json_path, erp_json_path):
+            self.assertTrue(p.is_file(), f"Missing schema asset {p}")
+
+        proto_text = proto_path.read_text(encoding="utf-8")
+        self.assertIn('syntax = "proto3";', proto_text)
+        self.assertIn("message CrmCustomerEvent", proto_text)
+
+        crm_cols = json.loads(crm_json_path.read_text(encoding="utf-8"))
+        crm_names = {c["name"] for c in crm_cols}
+        self.assertTrue({"event_id", "customer_id", "subscription_name", "message_id", "publish_time", "attributes"}.issubset(crm_names))
+
+        erp_cols = json.loads(erp_json_path.read_text(encoding="utf-8"))
+        erp_names = {c["name"] for c in erp_cols}
+        self.assertTrue({"invoice_id", "invoice_date", "vendor_id", "total_amount", "_ingested_at"}.issubset(erp_names))
+
+        guide_path = REPO_ROOT / "docs/03-enterprise-adoption-guide.md"
+        self.assertTrue(guide_path.is_file(), "Missing docs/03-enterprise-adoption-guide.md")
+        guide_text = guide_path.read_text(encoding="utf-8")
+        for token in (
+            "flowchart LR",
+            "pubsub_streams",
+            "batch_jobs",
+            "datastream_streams",
+            "enable_shared_datastream_private_connection",
+            "schemas/pubsub/crm_events.proto",
+            "schemas/bigquery/erp_invoices_bronze.json",
+            "link-stages.sh",
+            "generate-brownfield-link.py",
+            "build-batch-loader.yml",
+            "terraform-deploy.yml",
+            "pipeline_runs",
+        ):
+            self.assertIn(token, guide_text, f"Adoption guide missing {token}")
+
+        readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        for token in (
+            "docs/03-enterprise-adoption-guide.md",
+            "pubsub_streams",
+            "batch_jobs",
+            "datastream_streams",
+            "schemas/",
+        ):
+            self.assertIn(token, readme_text, f"README.md missing {token}")
+
+        agents_text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        claude_text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        for token in ("docs/03-enterprise-adoption-guide.md", "schemas/"):
+            self.assertIn(token, agents_text, f"AGENTS.md missing {token}")
+            self.assertIn(token, claude_text, f"CLAUDE.md missing {token}")
+        self.assertIn("add-batch-feed", agents_text)
+
+    def test_enterprise_terraform_validate_and_path_traversal_rejection(self) -> None:
+        tf_bin = shutil.which("terraform")
+        if tf_bin is None:
+            self.skipTest("terraform binary not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_repo = Path(tmp) / "repo"
+            for folder in ("modules", "schemas", "stages", "workflows"):
+                shutil.copytree(REPO_ROOT / folder, tmp_repo / folder)
+
+            ent_dir = tmp_repo / "stages" / "enterprise"
+            versions_path = ent_dir / "versions.tf"
+            versions_path.write_text(
+                versions_path.read_text(encoding="utf-8").replace('backend "gcs" {}', 'backend "local" {}'),
+                encoding="utf-8",
+            )
+            shutil.rmtree(ent_dir / ".terraform", ignore_errors=True)
+            cached_providers = REPO_ROOT / "stages" / "enterprise" / ".terraform" / "providers"
+            init_cmd = [tf_bin, f"-chdir={ent_dir}", "init", "-input=false"]
+            if cached_providers.is_dir():
+                init_cmd.append(f"-plugin-dir={cached_providers}")
+            init_res = subprocess.run(init_cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(init_res.returncode, 0, init_res.stderr)
+
+            tfvars = {
+                "core_storage_project_id": "core-proj-1",
+                "etl_compute_project_id": "etl-proj-1",
+                "bronze_dataset_id": "ent_bronze_raw",
+                "landing_bucket_name": "core-proj-1-landing",
+                "dataform_repository_name": "ent-medallion",
+                "batch_container_image": "asia-southeast1-docker.pkg.dev/etl-proj-1/repo/gcs-to-bronze@sha256:" + "0" * 64,
+                "enable_shared_datastream_private_connection": True,
+                "datastream_network_attachment_id": "projects/net/regions/asia-southeast1/networkAttachments/ds",
+                "pubsub_streams": {
+                    "crm-events": {
+                        "target_table_id": "crm_events_stream",
+                        "schema_type": "PROTOCOL_BUFFER",
+                        "schema_file": "schemas/pubsub/crm_events.proto",
+                        "target_table_schema_file": "schemas/bigquery/crm_events_bronze.json",
+                        "target_clustering": ["segment", "event_type"],
+                    }
+                },
+                "batch_jobs": {
+                    "erp-invoices": {
+                        "source_prefix": "incoming/erp_invoices/",
+                        "target_table": "erp_invoices_bronze",
+                        "partition_field": "invoice_date",
+                        "target_table_schema_file": "schemas/bigquery/erp_invoices_bronze.json",
+                    },
+                    "hr-roster": {
+                        "source_prefix": "incoming/hr_roster/",
+                        "target_table": "hr_roster_bronze",
+                        "partition_field": "",
+                    },
+                },
+                "datastream_streams": {
+                    "erp-db": {
+                        "source_engine": "POSTGRESQL",
+                        "db_host": "10.20.0.15",
+                        "db_username": "datastream_rep",
+                        "db_database": "erp_prod",
+                        "db_password_secret_version": "projects/etl-proj-1/secrets/erp-pwd/versions/1",
+                    },
+                    "billing-db": {
+                        "source_engine": "MYSQL",
+                        "db_host": "10.20.0.16",
+                        "db_username": "datastream_rep",
+                        "db_password_secret_version": "projects/etl-proj-1/secrets/billing-pwd/versions/1",
+                        "cdc_mode": "MERGE",
+                    },
+                },
+            }
+            tfvars_path = ent_dir / "multi_pipeline_test.auto.tfvars.json"
+            tfvars_path.write_text(json.dumps(tfvars), encoding="utf-8")
+
+            val_res = subprocess.run([tf_bin, f"-chdir={ent_dir}", "validate"], capture_output=True, text=True, check=False)
+            self.assertEqual(val_res.returncode, 0, val_res.stdout + val_res.stderr)
+
+            ok_console = subprocess.run(
+                [tf_bin, f"-chdir={ent_dir}", "console"],
+                input="keys(var.pubsub_streams)\nkeys(var.batch_jobs)\nkeys(var.datastream_streams)\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(ok_console.returncode, 0, ok_console.stderr)
+            self.assertEqual(ok_console.stderr.strip(), "")
+
+            tfvars["pubsub_streams"]["crm-events"]["schema_file"] = "schemas/../etc/passwd"
+            tfvars_path.write_text(json.dumps(tfvars), encoding="utf-8")
+            bad_pubsub = subprocess.run(
+                [tf_bin, f"-chdir={ent_dir}", "console"],
+                input="keys(var.pubsub_streams)\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("Invalid value for variable", bad_pubsub.stderr)
+
+            tfvars["pubsub_streams"]["crm-events"]["schema_file"] = "schemas/pubsub/crm_events.proto"
+            tfvars["batch_jobs"]["erp-invoices"]["target_table_schema_file"] = "../outside.json"
+            tfvars_path.write_text(json.dumps(tfvars), encoding="utf-8")
+            bad_batch = subprocess.run(
+                [tf_bin, f"-chdir={ent_dir}", "console"],
+                input="keys(var.batch_jobs)\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("Invalid value for variable", bad_batch.stderr)
 
 
 if __name__ == "__main__":

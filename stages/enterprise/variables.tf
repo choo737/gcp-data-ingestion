@@ -421,3 +421,103 @@ variable "labels" {
   }
   description = "Labels applied to enterprise ingestion resources."
 }
+
+variable "pubsub_streams" {
+  type = map(object({
+    target_table_id              = string
+    schema_type                  = optional(string, "PROTOCOL_BUFFER")
+    schema_definition            = optional(string, "")
+    schema_file                  = optional(string, "")
+    target_table_schema_json     = optional(string, "")
+    target_table_schema_file     = optional(string, "")
+    target_clustering            = optional(list(string), [])
+    drop_unknown_fields          = optional(bool, false)
+    writer_service_account_email = optional(string, "")
+  }))
+  default     = {}
+  description = "Declarative map of additional schema-validated Pub/Sub BigQuery ingestion streams."
+
+  validation {
+    condition = alltrue([
+      for k, v in var.pubsub_streams :
+      contains(["PROTOCOL_BUFFER", "AVRO"], v.schema_type) &&
+      (v.schema_file == "" || (startswith(v.schema_file, "schemas/") && !strcontains(v.schema_file, ".."))) &&
+      (v.target_table_schema_file == "" || (startswith(v.target_table_schema_file, "schemas/") && !strcontains(v.target_table_schema_file, "..")))
+    ])
+    error_message = "pubsub_streams must use PROTOCOL_BUFFER or AVRO and keep schema file paths under schemas/ without '..'."
+  }
+}
+
+variable "batch_jobs" {
+  type = map(object({
+    source_prefix            = string
+    target_table             = string
+    source_format            = optional(string, "NEWLINE_DELIMITED_JSON")
+    container_image          = optional(string, "")
+    partition_field          = optional(string, "")
+    target_clustering        = optional(list(string), [])
+    create_target_table      = optional(bool, true)
+    target_table_schema_json = optional(string, "")
+    target_table_schema_file = optional(string, "")
+    service_account_email    = optional(string, "")
+    quarantine_prefix        = optional(string, "quarantine/")
+    fail_on_quarantine       = optional(bool, true)
+    max_retries              = optional(number, 1)
+    timeout                  = optional(string, "600s")
+  }))
+  default     = {}
+  description = "Declarative map of additional Cloud Run v2 GCS-to-Bronze batch ingestion jobs."
+
+  validation {
+    condition = alltrue([
+      for k, v in var.batch_jobs :
+      contains(["CSV", "NEWLINE_DELIMITED_JSON", "PARQUET"], v.source_format) &&
+      (v.target_table_schema_file == "" || (startswith(v.target_table_schema_file, "schemas/") && !strcontains(v.target_table_schema_file, "..")))
+    ])
+    error_message = "batch_jobs must use CSV, NEWLINE_DELIMITED_JSON, or PARQUET and keep schema paths under schemas/ without '..'."
+  }
+}
+
+variable "enable_shared_datastream_private_connection" {
+  type        = bool
+  default     = false
+  description = "Provision one stage-level Datastream private connection shared across datastream_streams."
+}
+
+variable "shared_datastream_private_connection_id" {
+  type        = string
+  default     = ""
+  description = "Existing Datastream private connection ID reused by datastream_streams when shared creation is off."
+}
+
+variable "datastream_streams" {
+  type = map(object({
+    source_engine               = optional(string, "POSTGRESQL")
+    db_host                     = string
+    db_port                     = optional(number, 0)
+    db_username                 = string
+    db_database                 = optional(string, "appdb")
+    db_password_secret_version  = string
+    postgresql_publication      = optional(string, "datastream_pub")
+    postgresql_replication_slot = optional(string, "datastream_slot")
+    included_objects            = optional(map(list(string)), {})
+    cdc_mode                    = optional(string, "APPEND_ONLY")
+    data_freshness              = optional(string, "300s")
+    backfill_mode               = optional(string, "ALL")
+    start_stream                = optional(bool, false)
+    create_private_connection   = optional(bool, false)
+    private_connection_id       = optional(string, "")
+  }))
+  default     = {}
+  description = "Declarative map of additional Datastream CDC streams."
+
+  validation {
+    condition = alltrue([
+      for k, v in var.datastream_streams :
+      contains(["POSTGRESQL", "MYSQL"], v.source_engine) &&
+      contains(["APPEND_ONLY", "MERGE"], v.cdc_mode) &&
+      contains(["ALL", "NONE"], v.backfill_mode)
+    ])
+    error_message = "datastream_streams entries must use valid source_engine, cdc_mode, and backfill_mode values."
+  }
+}

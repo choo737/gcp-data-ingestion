@@ -89,6 +89,8 @@ Enable or disable each ingestion path independently inside `stages/enterprise/en
 
 Confirm these pattern-specific choices with the customer:
 
+- **Multi-Pipeline Enterprise Catalogs**: Add extra feeds via `pubsub_streams`, `batch_jobs`, and `datastream_streams` with `schemas/`.
+- **Shared Datastream Private Connection**: Set `enable_shared_datastream_private_connection = true` so multiple CDC streams share one PSC attachment.
 - **Datastream CDC**: Choose `POSTGRESQL` (`postgresql_publication`, `postgresql_replication_slot`) or `MYSQL` (GTID binlog), plus `backfill_mode` (`ALL` or `NONE`).
 - **Datastream Validation**: Set `datastream_create_without_validation = false` in production and `true` only for offline sandboxes.
 - **Pub/Sub DLQ Retention**: Module defaults `message_retention_duration` to `604800s` (seven days) and `max_delivery_attempts` to `5`.

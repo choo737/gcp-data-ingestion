@@ -11,3 +11,40 @@ enable_pipeline_workflow    = true
 enable_schedule             = false
 enable_gcs_eventarc_trigger = false
 delete_contents_on_destroy  = false
+
+# Optional multi-pipeline catalog (add entries here without editing main.tf):
+# enable_shared_datastream_private_connection = false
+#
+# pubsub_streams = {
+#   crm-events = {
+#     target_table_id          = "crm_events_stream"
+#     schema_type              = "PROTOCOL_BUFFER"
+#     schema_file              = "schemas/pubsub/crm_events.proto"
+#     target_table_schema_file = "schemas/bigquery/crm_events_bronze.json"
+#     target_clustering        = ["segment", "event_type"]
+#   }
+# }
+#
+# batch_jobs = {
+#   erp-invoices = {
+#     source_prefix            = "incoming/erp_invoices/"
+#     target_table             = "erp_invoices_bronze"
+#     source_format            = "NEWLINE_DELIMITED_JSON"
+#     container_image          = "asia-southeast1-docker.pkg.dev/example-etl-project/ent-containers/gcs-to-bronze:dev"
+#     partition_field          = "invoice_date"
+#     target_clustering        = ["entity_code", "invoice_status"]
+#     target_table_schema_file = "schemas/bigquery/erp_invoices_bronze.json"
+#   }
+# }
+#
+# datastream_streams = {
+#   erp-db = {
+#     source_engine              = "POSTGRESQL"
+#     db_host                    = "10.20.0.15"
+#     db_username                = "datastream_rep"
+#     db_database                = "erp_prod"
+#     db_password_secret_version = "projects/example-etl-project/secrets/ent-dev-erp-db-pwd/versions/1"
+#     included_objects           = { public = ["invoices", "vendors"] }
+#     cdc_mode                   = "APPEND_ONLY"
+#   }
+# }

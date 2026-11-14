@@ -51,6 +51,8 @@ locals {
   effective_dataform_sa_email = local.raw_df_sa != "" ? local.raw_df_sa : local.raw_df_sa_alias
 
   raw_pubsub_writer_sa         = var.pubsub_writer_sa_email != null ? trimspace(var.pubsub_writer_sa_email) : ""
+  raw_batch_loader_sa          = var.batch_loader_sa_email != null ? trimspace(var.batch_loader_sa_email) : ""
+  raw_shared_ds_priv_conn      = var.shared_datastream_private_connection_id != null ? trimspace(var.shared_datastream_private_connection_id) : ""
   effective_pii_restricted_tag = var.pii_restricted_policy_tag_id != null ? trimspace(var.pii_restricted_policy_tag_id) : ""
   effective_pii_masked_tag     = var.pii_masked_policy_tag_id != null ? trimspace(var.pii_masked_policy_tag_id) : ""
 
@@ -74,6 +76,16 @@ locals {
 
   effective_labels = merge({ environment = var.environment, managed_by = "terraform" }, var.labels)
 
+  any_pubsub_enabled     = var.enable_pubsub_stream || length(var.pubsub_streams) > 0
+  any_batch_enabled      = var.enable_batch_job || length(var.batch_jobs) > 0
+  any_datastream_enabled = var.enable_datastream_cdc || var.enable_shared_datastream_private_connection || length(var.datastream_streams) > 0
+
+  shared_ds_priv_conn_id = (
+    var.enable_shared_datastream_private_connection
+    ? google_datastream_private_connection.shared[0].id
+    : local.raw_shared_ds_priv_conn
+  )
+
   etl_required_apis = toset(concat(
     [
       "pubsub.googleapis.com",
@@ -81,8 +93,8 @@ locals {
       "workflowexecutions.googleapis.com",
       "iam.googleapis.com",
     ],
-    var.enable_batch_job ? ["run.googleapis.com"] : [],
-    var.enable_datastream_cdc ? ["datastream.googleapis.com"] : [],
+    local.any_batch_enabled ? ["run.googleapis.com"] : [],
+    local.any_datastream_enabled ? ["datastream.googleapis.com"] : [],
     var.enable_schedule ? ["cloudscheduler.googleapis.com"] : [],
     var.enable_gcs_eventarc_trigger ? ["eventarc.googleapis.com"] : [],
     (length(var.notification_channel_ids) > 0 || length(var.alert_email_addresses) > 0) ? ["monitoring.googleapis.com"] : [],
@@ -111,6 +123,14 @@ resource "terraform_data" "validate_enterprise_inputs" {
       condition     = !var.enable_datastream_cdc || (var.datastream_db_host != "" && var.datastream_db_username != "" && var.datastream_db_password_secret_version != "")
       error_message = "datastream_db_host, datastream_db_username, and datastream_db_password_secret_version are required when enable_datastream_cdc is true."
     }
+    precondition {
+      condition     = !var.enable_shared_datastream_private_connection || local.effective_ds_net_attachment != "" || (local.effective_vpc_id != "" && var.datastream_peering_cidr != "")
+      error_message = "enable_shared_datastream_private_connection requires datastream_network_attachment_id or both vpc_id and datastream_peering_cidr."
+    }
+    precondition {
+      condition     = alltrue([for k, v in var.batch_jobs : trimspace(v.container_image) != "" || local.effective_batch_image != ""])
+      error_message = "Each batch_jobs entry requires container_image or a stage-level batch_container_image."
+    }
   }
 }
 
@@ -129,7 +149,7 @@ resource "time_sleep" "api_propagation" {
 }
 
 resource "google_project_service_identity" "pubsub_agent" {
-  count    = var.enable_pubsub_stream ? 1 : 0
+  count    = local.any_pubsub_enabled ? 1 : 0
   provider = google-beta
   project  = local.effective_compute_project_id
   service  = "pubsub.googleapis.com"
@@ -138,7 +158,7 @@ resource "google_project_service_identity" "pubsub_agent" {
 }
 
 resource "google_project_service_identity" "datastream_agent" {
-  count    = var.enable_datastream_cdc ? 1 : 0
+  count    = local.any_datastream_enabled ? 1 : 0
   provider = google-beta
   project  = local.effective_compute_project_id
   service  = "datastream.googleapis.com"
@@ -156,7 +176,7 @@ resource "google_project_service_identity" "workflows_agent" {
 }
 
 resource "google_project_service_identity" "run_agent" {
-  count    = var.enable_batch_job ? 1 : 0
+  count    = local.any_batch_enabled ? 1 : 0
   provider = google-beta
   project  = local.effective_compute_project_id
   service  = "run.googleapis.com"
@@ -176,7 +196,7 @@ resource "time_sleep" "service_identity_propagation" {
 }
 
 resource "google_kms_crypto_key_iam_member" "pubsub_cmek" {
-  count = local.use_cmek && var.enable_pubsub_stream ? 1 : 0
+  count = local.use_cmek && local.any_pubsub_enabled ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -186,7 +206,7 @@ resource "google_kms_crypto_key_iam_member" "pubsub_cmek" {
 }
 
 resource "google_kms_crypto_key_iam_member" "datastream_cmek" {
-  count = local.use_cmek && var.enable_datastream_cdc ? 1 : 0
+  count = local.use_cmek && local.any_datastream_enabled ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -206,7 +226,7 @@ resource "google_kms_crypto_key_iam_member" "workflows_cmek" {
 }
 
 resource "google_kms_crypto_key_iam_member" "run_cmek" {
-  count = local.use_cmek && var.enable_batch_job ? 1 : 0
+  count = local.use_cmek && local.any_batch_enabled ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -225,6 +245,38 @@ resource "time_sleep" "cmek_propagation" {
     google_kms_crypto_key_iam_member.datastream_cmek,
     google_kms_crypto_key_iam_member.workflows_cmek,
     google_kms_crypto_key_iam_member.run_cmek,
+  ]
+}
+
+resource "google_datastream_private_connection" "shared" {
+  count = var.enable_shared_datastream_private_connection ? 1 : 0
+
+  project                   = local.effective_compute_project_id
+  location                  = var.region
+  private_connection_id     = trimsuffix(substr(lower(replace("${var.prefix}-shared-ds-priv", "_", "-")), 0, 60), "-")
+  display_name              = "${var.prefix} shared datastream private"
+  create_without_validation = var.datastream_create_without_validation
+  labels                    = local.effective_labels
+
+  dynamic "psc_interface_config" {
+    for_each = local.effective_ds_net_attachment != "" ? [local.effective_ds_net_attachment] : []
+    content {
+      network_attachment = psc_interface_config.value
+    }
+  }
+
+  dynamic "vpc_peering_config" {
+    for_each = local.effective_ds_net_attachment == "" && local.effective_vpc_id != "" ? [1] : []
+    content {
+      vpc    = local.effective_vpc_id
+      subnet = var.datastream_peering_cidr
+    }
+  }
+
+  depends_on = [
+    terraform_data.validate_enterprise_inputs,
+    time_sleep.service_identity_propagation,
+    time_sleep.cmek_propagation,
   ]
 }
 
@@ -269,6 +321,78 @@ module "batch_elt_job" {
   source_prefix                = var.batch_source_prefix
   target_table                 = var.batch_target_table
   source_format                = var.batch_source_format
+  service_account_email        = local.raw_batch_loader_sa
+  kms_key_id                   = local.effective_kms_key_id
+  pii_restricted_policy_tag_id = local.effective_pii_restricted_tag
+  pii_masked_policy_tag_id     = local.effective_pii_masked_tag
+  vpc_id                       = local.effective_vpc_id
+  subnet_id                    = local.effective_subnet_id
+  vpc_egress                   = var.batch_vpc_egress
+  delete_contents_on_destroy   = var.delete_contents_on_destroy
+  labels                       = local.effective_labels
+
+  depends_on = [
+    terraform_data.validate_enterprise_inputs,
+    time_sleep.service_identity_propagation,
+    time_sleep.cmek_propagation,
+  ]
+}
+
+module "pubsub_streams" {
+  for_each = var.pubsub_streams
+  source   = "../../modules/ingestion/pubsub-bigquery"
+
+  project_id                   = local.effective_compute_project_id
+  region                       = var.region
+  prefix                       = var.prefix
+  stream_name                  = each.key
+  bronze_project_id            = local.effective_core_project_id
+  bronze_dataset_id            = var.bronze_dataset_id
+  pubsub_project_number        = data.google_project.etl.number
+  target_table_id              = each.value.target_table_id
+  schema_type                  = each.value.schema_type
+  schema_definition            = trimspace(each.value.schema_file) != "" ? file("${path.module}/../../${trimspace(each.value.schema_file)}") : each.value.schema_definition
+  target_table_schema_json     = trimspace(each.value.target_table_schema_file) != "" ? file("${path.module}/../../${trimspace(each.value.target_table_schema_file)}") : each.value.target_table_schema_json
+  target_clustering            = each.value.target_clustering
+  drop_unknown_fields          = each.value.drop_unknown_fields
+  kms_key_id                   = local.effective_kms_key_id
+  pii_restricted_policy_tag_id = local.effective_pii_restricted_tag
+  pii_masked_policy_tag_id     = local.effective_pii_masked_tag
+  writer_service_account_email = trimspace(each.value.writer_service_account_email) != "" ? trimspace(each.value.writer_service_account_email) : local.raw_pubsub_writer_sa
+  delete_contents_on_destroy   = var.delete_contents_on_destroy
+  labels                       = local.effective_labels
+
+  depends_on = [
+    terraform_data.validate_enterprise_inputs,
+    time_sleep.service_identity_propagation,
+    time_sleep.cmek_propagation,
+  ]
+}
+
+module "batch_jobs" {
+  for_each = var.batch_jobs
+  source   = "../../modules/ingestion/batch-elt-job"
+
+  compute_project_id           = local.effective_compute_project_id
+  bronze_project_id            = local.effective_core_project_id
+  bronze_dataset_id            = var.bronze_dataset_id
+  landing_bucket_name          = var.landing_bucket_name
+  region                       = var.region
+  prefix                       = var.prefix
+  job_suffix                   = each.key
+  container_image              = trimspace(each.value.container_image) != "" ? trimspace(each.value.container_image) : local.effective_batch_image
+  source_prefix                = each.value.source_prefix
+  target_table                 = each.value.target_table
+  source_format                = each.value.source_format
+  partition_field              = each.value.partition_field
+  target_clustering            = each.value.target_clustering
+  create_target_table          = each.value.create_target_table
+  target_table_schema_json     = trimspace(each.value.target_table_schema_file) != "" ? file("${path.module}/../../${trimspace(each.value.target_table_schema_file)}") : each.value.target_table_schema_json
+  service_account_email        = trimspace(each.value.service_account_email)
+  quarantine_prefix            = each.value.quarantine_prefix
+  fail_on_quarantine           = each.value.fail_on_quarantine
+  max_retries                  = each.value.max_retries
+  timeout                      = each.value.timeout
   kms_key_id                   = local.effective_kms_key_id
   pii_restricted_policy_tag_id = local.effective_pii_restricted_tag
   pii_masked_policy_tag_id     = local.effective_pii_masked_tag
@@ -304,12 +428,57 @@ module "datastream_cdc" {
   bronze_dataset_id          = var.bronze_dataset_id
   cdc_mode                   = var.datastream_cdc_mode
   create_private_connection  = var.datastream_create_private_connection
+  private_connection_id      = var.datastream_create_private_connection ? "" : local.shared_ds_priv_conn_id
   network_attachment         = local.effective_ds_net_attachment
   vpc_id                     = local.effective_vpc_id
   peering_cidr               = var.datastream_peering_cidr
   kms_key_name               = local.effective_kms_key_id
   create_without_validation  = var.datastream_create_without_validation
   labels                     = local.effective_labels
+
+  depends_on = [
+    terraform_data.validate_enterprise_inputs,
+    time_sleep.service_identity_propagation,
+    time_sleep.cmek_propagation,
+  ]
+}
+
+module "datastream_streams" {
+  for_each = var.datastream_streams
+  source   = "../../modules/ingestion/datastream-cdc"
+
+  project_id                  = local.effective_compute_project_id
+  compute_project_id          = local.effective_compute_project_id
+  region                      = var.region
+  prefix                      = var.prefix
+  stream_name                 = each.key
+  source_engine               = each.value.source_engine
+  db_host                     = each.value.db_host
+  db_port                     = each.value.db_port
+  db_username                 = each.value.db_username
+  db_database                 = each.value.db_database
+  db_password_secret_version  = each.value.db_password_secret_version
+  postgresql_publication      = each.value.postgresql_publication
+  postgresql_replication_slot = each.value.postgresql_replication_slot
+  included_objects            = each.value.included_objects
+  bronze_project_id           = local.effective_core_project_id
+  bronze_dataset_id           = var.bronze_dataset_id
+  cdc_mode                    = each.value.cdc_mode
+  data_freshness              = each.value.data_freshness
+  backfill_mode               = each.value.backfill_mode
+  start_stream                = each.value.start_stream
+  create_private_connection   = each.value.create_private_connection
+  private_connection_id = each.value.create_private_connection ? "" : (
+    trimspace(each.value.private_connection_id) != ""
+    ? trimspace(each.value.private_connection_id)
+    : local.shared_ds_priv_conn_id
+  )
+  network_attachment        = local.effective_ds_net_attachment
+  vpc_id                    = local.effective_vpc_id
+  peering_cidr              = var.datastream_peering_cidr
+  kms_key_name              = local.effective_kms_key_id
+  create_without_validation = var.datastream_create_without_validation
+  labels                    = local.effective_labels
 
   depends_on = [
     terraform_data.validate_enterprise_inputs,

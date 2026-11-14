@@ -27,7 +27,7 @@ Never guess project IDs, dataset names, KMS keys, or database credentials.
 
 Check for an optional `platform-context.json` handoff file from [gcp-launchpad](https://github.com/choo737/gcp-launchpad) first.
 
-Walk through [QUESTIONNAIRE.md](../../../QUESTIONNAIRE.md) with the customer to confirm stage, tracks, networking, and schedule inputs.
+Walk through [QUESTIONNAIRE.md](../../../QUESTIONNAIRE.md) and [docs/03-enterprise-adoption-guide.md](../../../docs/03-enterprise-adoption-guide.md) to confirm stage, tracks, and networking.
 
 Ask the customer to select one deployment mode and stage:
 
@@ -38,9 +38,10 @@ Ask the customer to select one deployment mode and stage:
 Confirm these inputs before editing `envs/<env>.tfvars`, `terraform.tfvars`, or `custom.auto.tfvars`:
 
 - `environment`, `region` (default `asia-southeast1`), `prefix`, and `delete_contents_on_destroy`.
-- Active tracks: `enable_pubsub_stream`, `enable_batch_job`, `enable_datastream_cdc`, `enable_pipeline_workflow`.
-- Batch image digest URI (`batch_container_image`) and `batch_vpc_egress` when `enable_batch_job = true`.
-- Secret Manager version (`datastream_db_password_secret_version`) and PSC or peering inputs when `enable_datastream_cdc = true`.
+- Active baseline tracks: `enable_pubsub_stream`, `enable_batch_job`, `enable_datastream_cdc`, `enable_pipeline_workflow`.
+- Multi-pipeline catalogs: `pubsub_streams`, `batch_jobs`, `datastream_streams`, and `enable_shared_datastream_private_connection` with `schemas/`.
+- Batch image digest URI (`batch_container_image`) and `batch_vpc_egress` when `enable_batch_job = true` or `batch_jobs` is non-empty.
+- Secret Manager version (`datastream_db_password_secret_version`) and PSC or peering inputs when Datastream CDC is enabled.
 
 ## Step 2: Link Upstream Foundation or Brownfield Outputs
 

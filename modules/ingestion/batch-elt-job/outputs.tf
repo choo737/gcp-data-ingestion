@@ -14,8 +14,8 @@ output "job_resource_path" {
 }
 
 output "service_account_email" {
-  value       = google_service_account.batch_loader.email
-  description = "Dedicated service account email attached to the batch loader job."
+  value       = local.effective_sa_email
+  description = "Service account email attached to the batch loader job."
 }
 
 output "target_table_id" {
