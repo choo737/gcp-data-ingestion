@@ -956,22 +956,61 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             "build-batch-loader.yml",
             "terraform-deploy.yml",
             "pipeline_runs",
+            "https://github.com/choo737/gcp-launchpad",
+            "https://github.com/choo737/gcp-foundation",
+            "https://github.com/choo737/gcp-data-medallion",
         ):
             self.assertIn(token, guide_text, f"Adoption guide missing {token}")
 
+        canonical_readme_h2_sections = [
+            "## Template Suite Overview",
+            "## Create Your Private Repository (Do Not Fork Publicly)",
+            "## Architecture & Capabilities",
+            "## 6-Step Enterprise Operationalization",
+            "## AI Coding Agent Quickstart",
+            "## CI/CD Workflows",
+            "## Repository Layout",
+            "## Quick Verification",
+            "## Documentation Index",
+            "## License",
+        ]
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertTrue(readme_text.startswith("# GCP Data Ingestion\n"))
+        self.assertEqual(
+            [line.strip() for line in readme_text.splitlines() if line.startswith("## ")],
+            canonical_readme_h2_sections,
+        )
         for token in (
+            "https://github.com/choo737/gcp-launchpad",
+            "https://github.com/choo737/gcp-foundation",
+            "https://github.com/choo737/gcp-data-medallion",
+            "gcp-webapp",
+            "gcp-adk-agent",
+            "### Day-2 Multi-Pipeline Example",
+            "### Antigravity or OpenAI Codex",
+            "### Claude Code",
+            "setup-data-ingestion",
+            "add-streaming-topic",
+            "add-batch-feed",
+            "add-cdc-source",
+            "split-domain-ingestion",
             "docs/03-enterprise-adoption-guide.md",
             "pubsub_streams",
             "batch_jobs",
             "datastream_streams",
             "schemas/",
+            "[LICENSE](LICENSE)",
         ):
             self.assertIn(token, readme_text, f"README.md missing {token}")
 
         agents_text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude_text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        for token in ("docs/03-enterprise-adoption-guide.md", "schemas/"):
+        for token in (
+            "docs/03-enterprise-adoption-guide.md",
+            "schemas/",
+            "https://github.com/choo737/gcp-foundation",
+            "https://github.com/choo737/gcp-data-medallion",
+        ):
             self.assertIn(token, agents_text, f"AGENTS.md missing {token}")
             self.assertIn(token, claude_text, f"CLAUDE.md missing {token}")
         self.assertIn("add-batch-feed", agents_text)

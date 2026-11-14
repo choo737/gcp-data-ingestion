@@ -4,6 +4,8 @@ Keep every Bronze ingestion pipeline inside one private repository across `dev`,
 
 Teams add new feeds declaratively in `stages/enterprise/envs/<env>.tfvars` without editing `main.tf`.
 
+For the end-to-end multi-repo playbook, start with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), and [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion).
+
 ## Architecture and Multi-Pipeline Model
 
 One enterprise stage hosts `1..N` CDC databases, `1..M` Pub/Sub streams, and `1..K` batch loaders.
@@ -244,3 +246,9 @@ Operate live pipelines using telemetry tables, Cloud Monitoring alerts, and quar
 - **When to split repositories**: Keep one repository up to roughly `15` to `30` pipelines before splitting by business domain.
 
 See [Repository Scaling and Cloud Composer Guide](02-repo-scaling-and-composer.md) for domain-split steps and Composer 3 cost triggers.
+
+## Related Suite Guides
+
+- [GCP Launchpad](https://github.com/choo737/gcp-launchpad): End-to-end multi-repo operational playbook and Brownfield bridge.
+- [GCP Foundation](https://github.com/choo737/gcp-foundation): Upstream landing zone, IAM, KMS, VPC, and Dataform repository setup.
+- [GCP Data Medallion](https://github.com/choo737/gcp-data-medallion): Downstream Bronze declarations, Silver SCD Type 2, and Gold marts.

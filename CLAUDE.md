@@ -5,6 +5,7 @@ Read [AGENTS.md](AGENTS.md), [QUESTIONNAIRE.md](QUESTIONNAIRE.md), [docs/03-ente
 ## Quick Rules
 
 - Create a private repository (`gh repo create --private`) before storing any customer configuration.
+- Pair with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), and [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion) for end-to-end platform delivery.
 - Check optional `platform-context.json` from [gcp-launchpad](https://github.com/choo737/gcp-launchpad) or complete `QUESTIONNAIRE.md` first.
 - Link Greenfield outputs via `scripts/link-stages.sh --env <env>` or populate Brownfield `00_linked.auto.tfvars.json`.
 - Add Day-2 feeds via `pubsub_streams`, `batch_jobs`, `datastream_streams`, and `schemas/` without editing `main.tf`.

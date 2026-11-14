@@ -2,6 +2,8 @@
 
 This repository holds Terraform modules, runnable stages, batch loader code, and Cloud Workflows definitions.
 
+It pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), and [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion).
+
 ## Repository Layout
 
 - `modules/ingestion/`: Reusable modules (`datastream-cdc`, `pubsub-bigquery`, `batch-elt-job`, `pipeline-workflows`).
