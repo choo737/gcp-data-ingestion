@@ -8,11 +8,11 @@ This template pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpa
 
 <picture>
   <source type="image/webp" srcset="assets/cloud-city-ingestion.webp">
-  <img src="assets/cloud-city-ingestion.gif" alt="Cloud City Layer 02 Data Ingestion Architecture" width="100%">
+  <img src="assets/cloud-city-ingestion.gif" alt="Layer 02 data ingestion overview" width="100%">
 </picture>
 
-This repository builds **Layer 02**: the bullet-train Pub/Sub and Datastream CDC transit station.
-It also runs the GCS freight crane, quarantine gate, and Cloud Run batch loaders.
+`gcp-data-ingestion` owns **Layer 02**: Pub/Sub BigQuery streams and private Datastream CDC pipelines.
+It also manages GCS landing and quarantine buckets, Cloud Run batch loaders, and Workflows.
 
 Start in [gcp-launchpad](https://github.com/choo737/gcp-launchpad) to route Greenfield or Brownfield deployments across the full template suite.
 
