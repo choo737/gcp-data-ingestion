@@ -22,6 +22,14 @@ SKIP_FILES = frozenset({
     "custom.auto.tfvars",
 })
 
+BINARY_EXTENSIONS = frozenset({
+    ".webp",
+    ".gif",
+    ".png",
+    ".jpg",
+    ".jpeg",
+})
+
 LEAKED_IDENTIFIERS = (
     "jacky" + "choo",
     "alto" + "strat",
@@ -109,6 +117,8 @@ def _iter_repo_files() -> list[Path]:
             continue
         if path.name.endswith((".tfstate", ".tfstate.backup")) or ".tfstate." in path.name:
             continue
+        if path.suffix.lower() in BINARY_EXTENSIONS:
+            continue
         files.append(path)
     return files
 
@@ -140,7 +150,7 @@ def _extract_markdown_sentences(text: str) -> list[str]:
             continue
         if in_code:
             continue
-        if not stripped or stripped.startswith(("#", "|", "---")):
+        if not stripped or stripped.startswith(("#", "|", "---", "<picture", "</picture", "<source", "<img", "![")):
             flush_para()
             continue
         if BULLET_PREFIX_RE.match(stripped):
@@ -231,6 +241,22 @@ class AntiLeakAndMockTest(unittest.TestCase):
                         20,
                         f"Sentence exceeds 20 words ({len(words)}) in {rel}: {sentence}",
                     )
+
+    def test_visual_assets_have_valid_headers(self) -> None:
+        webp_path = REPO_ROOT / "assets" / "cloud-city-ingestion.webp"
+        gif_path = REPO_ROOT / "assets" / "cloud-city-ingestion.gif"
+
+        for asset_path in (webp_path, gif_path):
+            with self.subTest(asset=str(asset_path.relative_to(REPO_ROOT))):
+                self.assertTrue(asset_path.is_file(), f"Missing {asset_path}")
+                self.assertGreater(asset_path.stat().st_size, 100_000)
+
+        webp_head = webp_path.read_bytes()[:12]
+        self.assertEqual(webp_head[:4], b"RIFF")
+        self.assertEqual(webp_head[8:12], b"WEBP")
+
+        gif_head = gif_path.read_bytes()[:6]
+        self.assertEqual(gif_head, b"GIF89a")
 
 
 if __name__ == "__main__":

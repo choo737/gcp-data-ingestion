@@ -133,12 +133,18 @@ def resolve_env_gcs_uri(uri: str, env: str) -> str:
     if not obj:
         return f"gs://{bucket}/{env}/foundation-outputs.json"
     parts = obj.split("/")
+    filename = parts[-1]
     if env in parts[:-1]:
+        return uri
+    if filename and (
+        f"-{env}." in filename
+        or filename.startswith(f"{env}-")
+        or filename == f"{env}.json"
+    ):
         return uri
     if obj.endswith("/"):
         return f"gs://{bucket}/{obj}{env}/foundation-outputs.json"
     parent = "/".join(parts[:-1])
-    filename = parts[-1]
     if parent:
         return f"gs://{bucket}/{parent}/{env}/{filename}"
     return f"gs://{bucket}/{env}/{filename}"
@@ -232,12 +238,18 @@ def resolve_env_gcs_uri(uri: str, env: str) -> str:
     if not obj:
         return f"gs://{bucket}/{env}/foundation-outputs.json"
     parts = obj.split("/")
+    filename = parts[-1]
     if env in parts[:-1]:
+        return uri
+    if filename and (
+        f"-{env}." in filename
+        or filename.startswith(f"{env}-")
+        or filename == f"{env}.json"
+    ):
         return uri
     if obj.endswith("/"):
         return f"gs://{bucket}/{obj}{env}/foundation-outputs.json"
     parent = "/".join(parts[:-1])
-    filename = parts[-1]
     if parent:
         return f"gs://{bucket}/{parent}/{env}/{filename}"
     return f"gs://{bucket}/{env}/{filename}"

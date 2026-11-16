@@ -631,6 +631,39 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                 },
             )
 
+            for raw_uri, expected_store_name in (
+                ("gs://example-state", "example-state__dev__foundation-outputs.json"),
+                ("gs://example-state/foundation-outputs.json", "example-state__dev__foundation-outputs.json"),
+                ("gs://example-state/dev/foundation-outputs.json", "example-state__dev__foundation-outputs.json"),
+                ("gs://example-state/foundation-dev.json", "example-state__foundation-dev.json"),
+            ):
+                with self.subTest(uri=raw_uri):
+                    exp_res = subprocess.run(
+                        [str(script_path), "--env", "dev", "--export-gcs", raw_uri, str(src_a), str(src_b)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(exp_res.returncode, 0, exp_res.stderr)
+                    self.assertTrue((gcs_store / expected_store_name).is_file(), f"Missing {expected_store_name}")
+                    from_res = subprocess.run(
+                        [str(script_path), "--env", "dev", "--from-gcs", raw_uri, str(dst)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(from_res.returncode, 0, from_res.stderr)
+                    self.assertEqual(
+                        json.loads(linked_path.read_text(encoding="utf-8")),
+                        {
+                            "core_storage_project_id": "proj-core",
+                            "environment": "dev",
+                            "kms_key_id": "projects/p/locations/r/keyRings/k/cryptoKeys/c",
+                        },
+                    )
+
     def test_least_privilege_iam_policy_tags_and_security_invariants(self) -> None:
         cdc_main = (REPO_ROOT / "modules/ingestion/datastream-cdc/main.tf").read_text(encoding="utf-8")
         self.assertIn("secret_manager_stored_password = var.db_password_secret_version", cdc_main)
@@ -805,6 +838,30 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             wf_content = wf_path.read_text(encoding="utf-8")
             self.assertIn("contents: read", wf_content)
             self.assertRegex(wf_content, r"actions/checkout@[0-9a-f]{40}")
+            in_run_block = False
+            run_indent = 0
+            for line_no, raw_line in enumerate(wf_content.splitlines(), start=1):
+                stripped = raw_line.lstrip()
+                indent = len(raw_line) - len(stripped)
+                if in_run_block:
+                    if stripped and indent <= run_indent:
+                        in_run_block = False
+                    else:
+                        self.assertNotIn(
+                            "${{",
+                            raw_line,
+                            f"{wf_file}:{line_no}: expression interpolation inside run: block",
+                        )
+                        continue
+                if re.match(r"^(?:-\s*)?run\s*:", stripped):
+                    self.assertNotIn(
+                        "${{",
+                        stripped,
+                        f"{wf_file}:{line_no}: expression interpolation inside run: line",
+                    )
+                    if stripped.rstrip().endswith(("|", ">", "|-", ">-")):
+                        in_run_block = True
+                        run_indent = indent
 
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("1.8.5", ci)

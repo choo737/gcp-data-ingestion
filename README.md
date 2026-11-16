@@ -6,6 +6,14 @@ This template pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpa
 
 ## Template Suite Overview
 
+<picture>
+  <source type="image/webp" srcset="assets/cloud-city-ingestion.webp">
+  <img src="assets/cloud-city-ingestion.gif" alt="Cloud City Layer 02 Data Ingestion Architecture" width="100%">
+</picture>
+
+This repository builds **Layer 02**: the bullet-train Pub/Sub and Datastream CDC transit station.
+It also runs the GCS freight crane, quarantine gate, and Cloud Run batch loaders.
+
 Start in [gcp-launchpad](https://github.com/choo737/gcp-launchpad) to route Greenfield or Brownfield deployments across the full template suite.
 
 | Repository | Status | Layer | Responsibility |
@@ -163,6 +171,7 @@ Verify gcloud auth, collect intake values, link stages/enterprise, and add pipel
 
 ## Repository Layout
 
+- `assets/`: Cloud City Layer 02 visual architecture animations.
 - `modules/ingestion/`: Reusable five-file Terraform modules (`datastream-cdc`, `pubsub-bigquery`, `batch-elt-job`, `pipeline-workflows`).
 - `schemas/`: Reusable Proto3/Avro definitions (`schemas/pubsub/`) and BigQuery JSON schemas (`schemas/bigquery/`).
 - `stages/sandbox/`: Single-project stage with GCS remote backend and committed `.terraform.lock.hcl`.

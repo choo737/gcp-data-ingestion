@@ -77,7 +77,10 @@ jobs:
       - name: Export immutable digest URI
         id: publish_digest
         if: github.event_name != 'pull_request' && vars.GCP_WIF_PROVIDER != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+        env:
+          AR_REPO: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest }}
         run: |
-          digest_uri="${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}/gcs-to-bronze@${{ steps.build_push.outputs.digest }}"
+          digest_uri="${AR_REPO}/gcs-to-bronze@${IMAGE_DIGEST}"
           echo "image_digest_uri=$digest_uri" >> "$GITHUB_OUTPUT"
           echo "Published batch loader image: $digest_uri" >> "$GITHUB_STEP_SUMMARY"
