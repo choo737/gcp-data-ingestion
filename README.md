@@ -86,6 +86,7 @@ Follow [docs/03-enterprise-adoption-guide.md](docs/03-enterprise-adoption-guide.
 # Brownfield Day-1 link from gcp-launchpad platform-context.json:
 python3 ../gcp-launchpad/scripts/generate-brownfield-link.py \
   --context platform-context.json \
+  --env dev \
   --output stages/enterprise/00_linked.auto.tfvars.json
 
 # Initialize remote state and deploy an environment:
@@ -94,6 +95,8 @@ make init STAGE=enterprise ENV=prod TF_STATE_BUCKET=example-tf-state-bucket
 make plan STAGE=enterprise ENV=prod
 make apply STAGE=enterprise ENV=prod
 ```
+
+Track `stages/enterprise/envs/<env>.tfvars` in private customer GitOps repos while keeping `terraform.tfvars` and `*.auto.tfvars*` gitignored.
 
 ### Day-2 Multi-Pipeline Example
 

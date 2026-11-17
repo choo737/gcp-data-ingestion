@@ -664,6 +664,93 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                         },
                     )
 
+            # Verify --tfstate-bucket rejects empty/flag-swallowing inputs with exit code 2.
+            for bad_bucket_args in (
+                ["--env", "staging", "--tfstate-bucket", "", str(src_a), str(dst)],
+                ["--env", "staging", "--tfstate-bucket", "--env", str(src_a), str(dst)],
+                ["--env", "staging", "--tfstate-bucket=", str(src_a), str(dst)],
+                ["--env", "staging", "--tfstate-bucket", "BAD_BUCKET", str(src_a), str(dst)],
+            ):
+                with self.subTest(bad_bucket_args=bad_bucket_args):
+                    bad_res = subprocess.run(
+                        [str(script_path), *bad_bucket_args],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(bad_res.returncode, 2, bad_res.stderr)
+
+            # Verify fail-closed cross-env state mismatch guard in both local-link and --export-gcs modes.
+            mismatch_src = tmp_path / "mismatch_stage"
+            mismatch_src.mkdir()
+            mismatch_tf = bin_dir / "terraform"
+            mismatch_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps({'environment': {'value': 'dev', 'sensitive': False}, 'core_storage_project_id': {'value': 'proj-dev'}}))\n",
+                encoding="utf-8",
+            )
+            mismatch_tf.chmod(0o755)
+            for mismatch_args in (
+                ["--env", "staging", str(mismatch_src), str(dst)],
+                ["--env", "staging", "--export-gcs", "gs://example-state/out.json", str(mismatch_src)],
+            ):
+                with self.subTest(mismatch_args=mismatch_args):
+                    mm_res = subprocess.run(
+                        [str(script_path), *mismatch_args],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(mm_res.returncode, 1, mm_res.stderr)
+                    self.assertIn("ERROR:", mm_res.stderr)
+                    self.assertIn("environment='dev'", mm_res.stderr)
+                    self.assertIn("expected 'staging'", mm_res.stderr)
+
+            # Verify --tfstate-bucket + --env runs init -reconfigure with ingestion/<stage>/<env> on multi-env stage.
+            multi_src = tmp_path / "stages" / "enterprise"
+            (multi_src / "envs").mkdir(parents=True)
+            call_log = tmp_path / "link_tf_calls.log"
+            init_tf = bin_dir / "terraform"
+            init_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(args) + '\\n')\n"
+                "if 'output' in args:\n"
+                "    print(json.dumps({'environment': {'value': 'staging', 'sensitive': False}, 'core_storage_project_id': {'value': 'proj-stg'}}))\n",
+                encoding="utf-8",
+            )
+            init_tf.chmod(0o755)
+            init_env = env.copy()
+            init_env["TF_CALL_LOG"] = str(call_log)
+            init_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "staging",
+                    "--tfstate-bucket",
+                    "my-tfstate-bucket",
+                    "stages/enterprise",
+                    str(dst),
+                ],
+                cwd=tmp_path,
+                env=init_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_res.returncode, 0, init_res.stderr)
+            tf_calls = call_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(tf_calls), 2)
+            self.assertIn("init -reconfigure -input=false", tf_calls[0])
+            self.assertIn("-backend-config=bucket=my-tfstate-bucket", tf_calls[0])
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/staging", tf_calls[0])
+            self.assertIn("output -json", tf_calls[1])
+
     def test_least_privilege_iam_policy_tags_and_security_invariants(self) -> None:
         cdc_main = (REPO_ROOT / "modules/ingestion/datastream-cdc/main.tf").read_text(encoding="utf-8")
         self.assertIn("secret_manager_stored_password = var.db_password_secret_version", cdc_main)
@@ -869,6 +956,12 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertIn("1.8.5", ci)
         self.assertRegex(ci, r"hashicorp/setup-terraform@[0-9a-f]{40}")
         self.assertRegex(ci, r"actions/setup-python@[0-9a-f]{40}")
+
+        tf_deploy_wf = (REPO_ROOT / ".github/workflows/terraform-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("vars.GCP_WIF_SERVICE_ACCOUNT || vars.GCP_SERVICE_ACCOUNT", tf_deploy_wf)
+        self.assertIn("vars.GCP_TFSTATE_BUCKET || vars.TF_STATE_BUCKET", tf_deploy_wf)
+        build_wf = (REPO_ROOT / ".github/workflows/build-batch-loader.yml").read_text(encoding="utf-8")
+        self.assertIn("vars.GCP_WIF_SERVICE_ACCOUNT || vars.GCP_SERVICE_ACCOUNT", build_wf)
 
     def test_questionnaire_and_brownfield_doc_alignment(self) -> None:
         questionnaire_path = REPO_ROOT / "QUESTIONNAIRE.md"

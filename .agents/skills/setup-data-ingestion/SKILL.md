@@ -79,16 +79,15 @@ For Brownfield deployments without `gcp-foundation`, generate `stages/enterprise
 - Run `gcp-launchpad/scripts/generate-brownfield-link.py` against `platform-context.json`, or write `00_linked.auto.tfvars.json` directly.
 - Include required fields (`core_project_id`, `compute_project_id`, `bronze_dataset_id`, `landing_bucket_name`, `dataform_repository_name`) plus optional VPC/KMS IDs.
 
-Write customer overrides only into gitignored `custom.auto.tfvars` or untracked `envs/<env>.tfvars`.
+Track `envs/<env>.tfvars` in private customer GitOps repos; keep `terraform.tfvars` and `*.auto.tfvars*` gitignored.
 
 ## Step 3: Deploy with Terraform
 
 Initialize the GCS remote backend and run `plan` and `apply`:
 
 ```bash
-make init STAGE=enterprise ENV=dev TF_STATE_BUCKET=<tf-state-bucket>
-make plan STAGE=enterprise ENV=dev
-make apply STAGE=enterprise ENV=dev
+make plan STAGE=enterprise ENV=dev TFSTATE_BUCKET=<bucket>
+make apply STAGE=enterprise ENV=dev TFSTATE_BUCKET=<bucket>
 ```
 
 ## Step 4: Verify Live Pub/Sub, DLQ Quarantine, and Cloud Workflows

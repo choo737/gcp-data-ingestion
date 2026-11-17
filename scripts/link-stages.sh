@@ -4,13 +4,32 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  link-stages.sh [--env <env>] <source_stage_dir> [<source_stage_dir> ...] <target_stage_dir>
-  link-stages.sh [--env <env>] --export-gcs <gs://bucket/path.json> <source_stage_dir> [<source_stage_dir> ...]
+  link-stages.sh [--env <env>] [--tfstate-bucket <bucket>] <source_stage_dir> [<source_stage_dir> ...] <target_stage_dir>
+  link-stages.sh [--env <env>] [--tfstate-bucket <bucket>] --export-gcs <gs://bucket/path.json> <source_stage_dir> [<source_stage_dir> ...]
   link-stages.sh [--env <env>] --from-gcs <gs://bucket/path.json> [<gs://bucket/path2.json> ...] <target_stage_dir>
 EOF
 }
 
+die_usage() {
+  printf 'ERROR: %s\n' "$1" >&2
+  exit 2
+}
+
+require_flag_value() {
+  local flag="$1"
+  local remaining="$2"
+  local value="${3:-}"
+  if [ "$remaining" -lt 2 ] || [ -z "$value" ] || [[ "$value" == -* ]]; then
+    die_usage "Missing or empty value for ${flag}"
+  fi
+}
+
+BUCKET_RE='^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$'
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 env_name=""
+tfstate_bucket="${TFSTATE_BUCKET:-${GCP_TFSTATE_BUCKET:-${TF_STATE_BUCKET:-}}}"
+tfstate_bucket_explicit=false
 mode="local"
 gcs_uri=""
 positional=()
@@ -18,16 +37,29 @@ positional=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env)
-      shift
-      if [ "$#" -lt 1 ]; then
-        usage
-        exit 1
-      fi
-      env_name="$1"
-      shift
+      require_flag_value "$1" "$#" "${2:-}"
+      env_name="$2"
+      shift 2
       ;;
     --env=*)
       env_name="${1#--env=}"
+      if [ -z "$env_name" ] || [[ "$env_name" == -* ]]; then
+        die_usage "Missing or empty value for --env"
+      fi
+      shift
+      ;;
+    --tfstate-bucket)
+      require_flag_value "$1" "$#" "${2:-}"
+      tfstate_bucket="$2"
+      tfstate_bucket_explicit=true
+      shift 2
+      ;;
+    --tfstate-bucket=*)
+      tfstate_bucket="${1#--tfstate-bucket=}"
+      tfstate_bucket_explicit=true
+      if [ -z "$tfstate_bucket" ] || [[ "$tfstate_bucket" == -* ]]; then
+        die_usage "Missing or empty value for --tfstate-bucket"
+      fi
       shift
       ;;
     --export-gcs)
@@ -68,6 +100,14 @@ if [ -n "$env_name" ]; then
     echo "Invalid --env value: $env_name" >&2
     exit 1
   fi
+fi
+
+if [ -n "$tfstate_bucket" ]; then
+  if [[ ! "$tfstate_bucket" =~ $BUCKET_RE ]]; then
+    die_usage "Invalid --tfstate-bucket value: ${tfstate_bucket}"
+  fi
+elif [ "$tfstate_bucket_explicit" = true ]; then
+  die_usage "Missing or empty value for --tfstate-bucket"
 fi
 
 if [ "$mode" = "export-gcs" ]; then
@@ -115,7 +155,7 @@ if [ "$mode" = "export-gcs" ]; then
     echo "Invalid GCS URI: $gcs_uri" >&2
     exit 1
   fi
-  python3 - "$env_name" "$gcs_uri" "${source_dirs[@]}" <<'PY'
+  python3 - "$env_name" "$gcs_uri" "$tfstate_bucket" "$REPO_ROOT" "${source_dirs[@]}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -126,7 +166,9 @@ import tempfile
 
 env_name = sys.argv[1]
 raw_gcs_uri = sys.argv[2]
-source_dirs = [Path(p) for p in sys.argv[3:]]
+tfstate_bucket = sys.argv[3]
+repo_root = Path(sys.argv[4]).resolve()
+raw_sources = sys.argv[5:]
 
 
 def resolve_env_gcs_uri(uri: str, env: str) -> str:
@@ -157,7 +199,24 @@ def resolve_env_gcs_uri(uri: str, env: str) -> str:
     return f"gs://{bucket}/{env}/{filename}"
 
 
-def read_stage_outputs(src: Path, env: str) -> dict[str, object]:
+def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
+    try:
+        rel_stage = src_abs.resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        cleaned = raw_src.rstrip("/")
+        if cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if Path(raw_src).is_absolute():
+            rel_stage = f"stages/{src_abs.name}" if src_abs.parent.name == "stages" else src_abs.name
+        else:
+            rel_stage = cleaned
+    if rel_stage.startswith("stages/"):
+        rel_stage = rel_stage[len("stages/"):]
+    return f"ingestion/{rel_stage}/{env}"
+
+
+def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, object]:
+    src = Path(raw_src)
     effective_src = src
     sub_env = src / env if env else None
     envs_sub = src / "envs" / env if env else None
@@ -170,18 +229,45 @@ def read_stage_outputs(src: Path, env: str) -> dict[str, object]:
     if env and (effective_src / "terraform.tfstate.d" / env).is_dir():
         cmd_env["TF_WORKSPACE"] = env
 
+    if env and state_bucket and (effective_src / "envs").is_dir():
+        backend_prefix = resolve_backend_prefix(raw_src, effective_src.resolve(), env)
+        subprocess.run(
+            [
+                "terraform",
+                f"-chdir={effective_src}",
+                "init",
+                "-reconfigure",
+                "-input=false",
+                f"-backend-config=bucket={state_bucket}",
+                f"-backend-config=prefix={backend_prefix}",
+            ],
+            check=True,
+            env=cmd_env,
+            stdout=subprocess.DEVNULL,
+        )
+
     raw = subprocess.check_output(
         ["terraform", f"-chdir={effective_src}", "output", "-json"],
         text=True,
         env=cmd_env,
     )
-    return json.loads(raw)
+    outputs = json.loads(raw)
+    if env and isinstance(outputs.get("environment"), dict):
+        actual_env = outputs["environment"].get("value")
+        if isinstance(actual_env, str) and actual_env.strip() and actual_env.strip() != env:
+            print(
+                f"ERROR: Stage {raw_src} Terraform state has environment='{actual_env.strip()}', expected '{env}'. "
+                f"Re-init the stage for '{env}' or pass --tfstate-bucket.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    return outputs
 
 
 gcs_uri = resolve_env_gcs_uri(raw_gcs_uri, env_name)
 exported: dict[str, object] = {}
-for src in source_dirs:
-    outputs = read_stage_outputs(src, env_name)
+for raw_src in raw_sources:
+    outputs = read_stage_outputs(raw_src, env_name, tfstate_bucket)
     for key, payload in outputs.items():
         if not isinstance(payload, dict):
             continue
@@ -310,7 +396,7 @@ PY
   exit 0
 fi
 
-python3 - "$env_name" "$target_abs" "$out_file" "${source_dirs[@]}" <<'PY'
+python3 - "$env_name" "$target_abs" "$out_file" "$tfstate_bucket" "$REPO_ROOT" "${source_dirs[@]}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -321,13 +407,32 @@ import sys
 env_name = sys.argv[1]
 target_dir = Path(sys.argv[2])
 out_file = Path(sys.argv[3])
-source_dirs = [Path(p) for p in sys.argv[4:]]
+tfstate_bucket = sys.argv[4]
+repo_root = Path(sys.argv[5]).resolve()
+raw_sources = sys.argv[6:]
 
 var_re = re.compile(r'^\s*variable\s+"([A-Za-z0-9_]+)"\s*\{', re.MULTILINE)
 declared_vars = set(var_re.findall((target_dir / "variables.tf").read_text(encoding="utf-8")))
 
 
-def read_stage_outputs(src: Path, env: str) -> dict[str, object]:
+def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
+    try:
+        rel_stage = src_abs.resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        cleaned = raw_src.rstrip("/")
+        if cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if Path(raw_src).is_absolute():
+            rel_stage = f"stages/{src_abs.name}" if src_abs.parent.name == "stages" else src_abs.name
+        else:
+            rel_stage = cleaned
+    if rel_stage.startswith("stages/"):
+        rel_stage = rel_stage[len("stages/"):]
+    return f"ingestion/{rel_stage}/{env}"
+
+
+def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, object]:
+    src = Path(raw_src)
     effective_src = src
     sub_env = src / env if env else None
     envs_sub = src / "envs" / env if env else None
@@ -340,18 +445,45 @@ def read_stage_outputs(src: Path, env: str) -> dict[str, object]:
     if env and (effective_src / "terraform.tfstate.d" / env).is_dir():
         cmd_env["TF_WORKSPACE"] = env
 
+    if env and state_bucket and (effective_src / "envs").is_dir():
+        backend_prefix = resolve_backend_prefix(raw_src, effective_src.resolve(), env)
+        subprocess.run(
+            [
+                "terraform",
+                f"-chdir={effective_src}",
+                "init",
+                "-reconfigure",
+                "-input=false",
+                f"-backend-config=bucket={state_bucket}",
+                f"-backend-config=prefix={backend_prefix}",
+            ],
+            check=True,
+            env=cmd_env,
+            stdout=subprocess.DEVNULL,
+        )
+
     raw = subprocess.check_output(
         ["terraform", f"-chdir={effective_src}", "output", "-json"],
         text=True,
         env=cmd_env,
     )
-    return json.loads(raw)
+    outputs = json.loads(raw)
+    if env and isinstance(outputs.get("environment"), dict):
+        actual_env = outputs["environment"].get("value")
+        if isinstance(actual_env, str) and actual_env.strip() and actual_env.strip() != env:
+            print(
+                f"ERROR: Stage {raw_src} Terraform state has environment='{actual_env.strip()}', expected '{env}'. "
+                f"Re-init the stage for '{env}' or pass --tfstate-bucket.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    return outputs
 
 
 merged: dict[str, object] = {}
 
-for src in source_dirs:
-    outputs = read_stage_outputs(src, env_name)
+for raw_src in raw_sources:
+    outputs = read_stage_outputs(raw_src, env_name, tfstate_bucket)
     for key, payload in outputs.items():
         if key not in declared_vars or not isinstance(payload, dict):
             continue
