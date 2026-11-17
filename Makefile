@@ -1,14 +1,20 @@
 ENV ?= dev
 STAGE ?= enterprise
+TFSTATE_BUCKET ?=
 TF_STATE_BUCKET ?=
+VAR_FILE ?=
+
+EFFECTIVE_STATE_BUCKET := $(if $(strip $(TFSTATE_BUCKET)),$(strip $(TFSTATE_BUCKET)),$(strip $(TF_STATE_BUCKET)))
 
 ROOTS := \
 	stages/sandbox \
 	stages/enterprise
 
-STAGE_DIR := stages/$(STAGE)
-BACKEND_PREFIX := ingestion/$(STAGE)/$(ENV)
-VAR_FILE := $(STAGE_DIR)/envs/$(ENV).tfvars
+NORMALIZED_STAGE := $(patsubst stages/%,%,$(STAGE))
+STAGE_DIR := stages/$(NORMALIZED_STAGE)
+BACKEND_PREFIX := ingestion/$(NORMALIZED_STAGE)/$(ENV)
+
+export ENV TFSTATE_BUCKET TF_STATE_BUCKET STAGE VAR_FILE
 
 .PHONY: fmt fmt-check validate init plan apply test clean
 
@@ -26,26 +32,38 @@ validate:
 	done
 
 init:
-	@if [ -z "$(TF_STATE_BUCKET)" ]; then \
-		echo "Set TF_STATE_BUCKET=<gcs-bucket> before running make init" >&2; \
+	@case "$(STAGE_DIR)" in \
+		stages/sandbox|stages/enterprise) ;; \
+		*) echo "Invalid STAGE: $(STAGE)" >&2; exit 1 ;; \
+	esac; \
+	case "$(ENV)" in \
+		dev|staging|prod) ;; \
+		*) echo "Invalid ENV: $(ENV)" >&2; exit 1 ;; \
+	esac; \
+	if [ -z "$(EFFECTIVE_STATE_BUCKET)" ]; then \
+		echo "Set TFSTATE_BUCKET or TF_STATE_BUCKET=<gcs-bucket> before running make init" >&2; \
 		exit 1; \
-	fi
-	terraform -chdir="$(STAGE_DIR)" init -reconfigure \
-		-backend-config="bucket=$(TF_STATE_BUCKET)" \
+	fi; \
+	terraform -chdir="$(STAGE_DIR)" init -reconfigure -input=false \
+		-backend-config="bucket=$(EFFECTIVE_STATE_BUCKET)" \
 		-backend-config="prefix=$(BACKEND_PREFIX)"
 
-plan:
-	@if [ -f "$(VAR_FILE)" ]; then \
-		terraform -chdir="$(STAGE_DIR)" plan -var-file="envs/$(ENV).tfvars"; \
+plan: init
+	@if [ -n "$(VAR_FILE)" ]; then \
+		terraform -chdir="$(STAGE_DIR)" plan -input=false -var-file="$(VAR_FILE)"; \
+	elif [ -f "$(STAGE_DIR)/envs/$(ENV).tfvars" ]; then \
+		terraform -chdir="$(STAGE_DIR)" plan -input=false -var-file="envs/$(ENV).tfvars"; \
 	else \
-		terraform -chdir="$(STAGE_DIR)" plan; \
+		terraform -chdir="$(STAGE_DIR)" plan -input=false; \
 	fi
 
-apply:
-	@if [ -f "$(VAR_FILE)" ]; then \
-		terraform -chdir="$(STAGE_DIR)" apply -var-file="envs/$(ENV).tfvars"; \
+apply: init
+	@if [ -n "$(VAR_FILE)" ]; then \
+		terraform -chdir="$(STAGE_DIR)" apply -input=false -var-file="$(VAR_FILE)"; \
+	elif [ -f "$(STAGE_DIR)/envs/$(ENV).tfvars" ]; then \
+		terraform -chdir="$(STAGE_DIR)" apply -input=false -var-file="envs/$(ENV).tfvars"; \
 	else \
-		terraform -chdir="$(STAGE_DIR)" apply; \
+		terraform -chdir="$(STAGE_DIR)" apply -input=false; \
 	fi
 
 test:

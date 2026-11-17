@@ -246,17 +246,14 @@ class AntiLeakAndMockTest(unittest.TestCase):
         webp_path = REPO_ROOT / "assets" / "cloud-city-ingestion.webp"
         gif_path = REPO_ROOT / "assets" / "cloud-city-ingestion.gif"
 
-        for asset_path in (webp_path, gif_path):
-            with self.subTest(asset=str(asset_path.relative_to(REPO_ROOT))):
-                self.assertTrue(asset_path.is_file(), f"Missing {asset_path}")
-                self.assertGreater(asset_path.stat().st_size, 100_000)
+        self.assertTrue(webp_path.is_file(), f"Missing {webp_path}")
+        self.assertGreater(webp_path.stat().st_size, 100_000)
 
         webp_head = webp_path.read_bytes()[:12]
         self.assertEqual(webp_head[:4], b"RIFF")
         self.assertEqual(webp_head[8:12], b"WEBP")
 
-        gif_head = gif_path.read_bytes()[:6]
-        self.assertEqual(gif_head, b"GIF89a")
+        self.assertFalse(gif_path.exists(), f"Duplicate GIF asset must not exist: {gif_path}")
 
 
 if __name__ == "__main__":

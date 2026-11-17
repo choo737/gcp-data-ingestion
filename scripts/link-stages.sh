@@ -8,7 +8,6 @@ Usage:
   link-stages.sh [--env <env>] --export-gcs <gs://bucket/path.json> <source_stage_dir> [<source_stage_dir> ...]
   link-stages.sh [--env <env>] --from-gcs <gs://bucket/path.json> [<gs://bucket/path2.json> ...] <target_stage_dir>
 EOF
-  exit 1
 }
 
 env_name=""
@@ -22,6 +21,7 @@ while [ "$#" -gt 0 ]; do
       shift
       if [ "$#" -lt 1 ]; then
         usage
+        exit 1
       fi
       env_name="$1"
       shift
@@ -33,11 +33,13 @@ while [ "$#" -gt 0 ]; do
     --export-gcs)
       if [ "$mode" != "local" ]; then
         usage
+        exit 1
       fi
       mode="export-gcs"
       shift
       if [ "$#" -lt 1 ]; then
         usage
+        exit 1
       fi
       gcs_uri="$1"
       shift
@@ -45,12 +47,14 @@ while [ "$#" -gt 0 ]; do
     --from-gcs)
       if [ "$mode" != "local" ]; then
         usage
+        exit 1
       fi
       mode="from-gcs"
       shift
       ;;
     -h|--help)
       usage
+      exit 0
       ;;
     *)
       positional+=("$1")
@@ -69,17 +73,20 @@ fi
 if [ "$mode" = "export-gcs" ]; then
   if [ "${#positional[@]}" -lt 1 ]; then
     usage
+    exit 1
   fi
   source_dirs=("${positional[@]}")
 elif [ "$mode" = "from-gcs" ]; then
   if [ "${#positional[@]}" -lt 2 ]; then
     usage
+    exit 1
   fi
   target_dir="${positional[$(( ${#positional[@]} - 1 ))]}"
   gcs_uris=("${positional[@]:0:$(( ${#positional[@]} - 1 ))}")
 else
   if [ "${#positional[@]}" -lt 2 ]; then
     usage
+    exit 1
   fi
   target_dir="${positional[$(( ${#positional[@]} - 1 ))]}"
   source_dirs=("${positional[@]:0:$(( ${#positional[@]} - 1 ))}")
@@ -104,8 +111,8 @@ if [ "$mode" = "local" ] || [ "$mode" = "export-gcs" ]; then
 fi
 
 if [ "$mode" = "export-gcs" ]; then
-  if [[ "$gcs_uri" != gs://* ]]; then
-    echo "Export destination must be a gs:// URI: $gcs_uri" >&2
+  if [[ ! "$gcs_uri" =~ ^gs://[a-z0-9][a-z0-9._-]{1,61}[a-z0-9](/.*)?$ ]]; then
+    echo "Invalid GCS URI: $gcs_uri" >&2
     exit 1
   fi
   python3 - "$env_name" "$gcs_uri" "${source_dirs[@]}" <<'PY'
@@ -207,8 +214,8 @@ fi
 
 if [ "$mode" = "from-gcs" ]; then
   for uri in "${gcs_uris[@]}"; do
-    if [[ "$uri" != gs://* ]]; then
-      echo "Source URI must start with gs://: $uri" >&2
+    if [[ ! "$uri" =~ ^gs://[a-z0-9][a-z0-9._-]{1,61}[a-z0-9](/.*)?$ ]]; then
+      echo "Invalid GCS URI: $uri" >&2
       exit 1
     fi
   done

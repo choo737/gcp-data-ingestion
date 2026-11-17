@@ -6,10 +6,7 @@ This template pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpa
 
 ## Template Suite Overview
 
-<picture>
-  <source type="image/webp" srcset="assets/cloud-city-ingestion.webp">
-  <img src="assets/cloud-city-ingestion.gif" alt="Layer 02 data ingestion overview" width="100%">
-</picture>
+<img src="assets/cloud-city-ingestion.webp" alt="Layer 02 data ingestion overview" width="100%">
 
 `gcp-data-ingestion` owns **Layer 02**: Pub/Sub BigQuery streams and private Datastream CDC pipelines.
 It also manages GCS landing and quarantine buckets, Cloud Run batch loaders, and Workflows.

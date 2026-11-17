@@ -827,7 +827,9 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
 
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("ENV ?= dev", makefile)
-        self.assertIn("ingestion/$(STAGE)/$(ENV)", makefile)
+        self.assertIn("ingestion/$(NORMALIZED_STAGE)/$(ENV)", makefile)
+        self.assertIn("EFFECTIVE_STATE_BUCKET", makefile)
+        self.assertIn("plan: init", makefile)
         self.assertIn("stages/sandbox", makefile)
         self.assertIn("stages/enterprise", makefile)
         self.assertNotIn('.terraform.lock.hcl', makefile)
@@ -1182,6 +1184,102 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                 check=False,
             )
             self.assertIn("Invalid value for variable", bad_batch.stderr)
+
+    def test_makefile_stage_normalization_tfstate_bucket_and_link_help(self) -> None:
+        script_path = REPO_ROOT / "scripts" / "link-stages.sh"
+        for flag in ("-h", "--help"):
+            help_res = subprocess.run(
+                [str(script_path), flag],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(help_res.returncode, 0, help_res.stderr)
+            self.assertIn("Usage:", help_res.stderr)
+
+        for bad_uri in ("gs://ab/out.json", "gs://BAD_BUCKET/out.json", "s3://example-state/out.json"):
+            bad_res = subprocess.run(
+                [str(script_path), "--export-gcs", bad_uri, "stages/enterprise"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_res.returncode, 0)
+            self.assertIn("Invalid GCS URI", bad_res.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            log_file = tmp_path / "tf_calls.log"
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, sys\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(sys.argv[1:]) + '\\n')\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["TF_CALL_LOG"] = str(log_file)
+
+            plan_res = subprocess.run(
+                [
+                    "make",
+                    "plan",
+                    "STAGE=stages/enterprise",
+                    "ENV=dev",
+                    "TFSTATE_BUCKET=my-bucket",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(plan_res.returncode, 0, plan_res.stdout + plan_res.stderr)
+            calls = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertIn("-chdir=stages/enterprise init", calls[0])
+            self.assertIn("-backend-config=bucket=my-bucket", calls[0])
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/dev", calls[0])
+            self.assertIn("-chdir=stages/enterprise plan", calls[1])
+
+            log_file.unlink()
+            legacy_res = subprocess.run(
+                [
+                    "make",
+                    "init",
+                    "STAGE=enterprise",
+                    "ENV=staging",
+                    "TF_STATE_BUCKET=legacy-bucket",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(legacy_res.returncode, 0, legacy_res.stdout + legacy_res.stderr)
+            legacy_calls = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(legacy_calls), 1)
+            self.assertIn("-chdir=stages/enterprise init", legacy_calls[0])
+            self.assertIn("-backend-config=bucket=legacy-bucket", legacy_calls[0])
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/staging", legacy_calls[0])
+
+            bad_stage = subprocess.run(
+                ["make", "init", "STAGE=unknown", "TFSTATE_BUCKET=my-bucket"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_stage.returncode, 0)
 
 
 if __name__ == "__main__":
