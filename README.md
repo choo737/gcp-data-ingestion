@@ -2,7 +2,7 @@
 
 Manage all enterprise Bronze ingestion pipelines inside one private repository across `dev`, `staging`, and `prod`.
 
-This template pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), and [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion).
+This template pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion), and [gcp-data-science](https://github.com/choo737/gcp-data-science).
 
 ## Template Suite Overview
 
@@ -19,6 +19,7 @@ Start in [gcp-launchpad](https://github.com/choo737/gcp-launchpad) to route Gree
 | [gcp-foundation](https://github.com/choo737/gcp-foundation) | Active | Platform & Governance | Org guardrails, projects, KMS, datasets, Dataform repo, and Dataplex scans |
 | **gcp-data-ingestion** *(this repo)* | Active | Ingestion & Pipeline Runner | Datastream CDC, Pub/Sub streaming, GCS batch loader, and Cloud Workflows |
 | [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion) | Active | Warehouse & Quality | Bronze declarations, Silver SCD Type 2, Gold marts, and quality specs |
+| [gcp-data-science](https://github.com/choo737/gcp-data-science) | Active | Data Science & XAI | Regulated ML pipelines, custom SHAP containers, model gates, and XAI drift ops |
 | `gcp-webapp` *(Planned)* | Roadmap | Application Tier | Regional/multi-region HA web apps on Cloud Run v2 and Cloud SQL |
 | `gcp-adk-agent` *(Planned)* | Roadmap | AI Agent Tier | Production Google ADK agents on Vertex AI Agent Engine or Cloud Run v2 |
 

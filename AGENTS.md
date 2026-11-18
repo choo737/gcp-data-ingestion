@@ -2,7 +2,7 @@
 
 This repository holds Terraform modules, runnable stages, batch loader code, and Cloud Workflows definitions.
 
-It pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), and [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion).
+It pairs with [gcp-launchpad](https://github.com/choo737/gcp-launchpad), [gcp-foundation](https://github.com/choo737/gcp-foundation), [gcp-data-medallion](https://github.com/choo737/gcp-data-medallion), and [gcp-data-science](https://github.com/choo737/gcp-data-science).
 
 ## Repository Layout
 
