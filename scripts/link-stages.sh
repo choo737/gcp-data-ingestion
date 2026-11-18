@@ -206,6 +206,8 @@ def resolve_env_gcs_uri(uri: str, env: str) -> str:
     obj = obj.lstrip("/")
     if not obj:
         return f"gs://{bucket}/{env}/foundation-outputs.json"
+    if obj == "shared" or obj.startswith("shared/"):
+        return uri
     parts = obj.split("/")
     filename = parts[-1]
     if env in parts[:-1]:
@@ -358,6 +360,8 @@ def resolve_env_gcs_uri(uri: str, env: str) -> str:
     obj = obj.lstrip("/")
     if not obj:
         return f"gs://{bucket}/{env}/foundation-outputs.json"
+    if obj == "shared" or obj.startswith("shared/"):
+        return uri
     parts = obj.split("/")
     filename = parts[-1]
     if env in parts[:-1]:

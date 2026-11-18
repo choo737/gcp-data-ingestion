@@ -636,6 +636,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                 ("gs://example-state/foundation-outputs.json", "example-state__dev__foundation-outputs.json"),
                 ("gs://example-state/dev/foundation-outputs.json", "example-state__dev__foundation-outputs.json"),
                 ("gs://example-state/foundation-dev.json", "example-state__foundation-dev.json"),
+                ("gs://example-state/shared/01-org-governance-outputs.json", "example-state__shared__01-org-governance-outputs.json"),
             ):
                 with self.subTest(uri=raw_uri):
                     exp_res = subprocess.run(
@@ -1420,6 +1421,7 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         self.assertIn('variable "domain_name"', ent_vars)
         self.assertIn("local.workflow_prefix", ent_main)
         self.assertIn("local.pubsub_stream_name", ent_main)
+        self.assertRegex(ent_main, r'module\s+"batch_elt_job"[\s\S]*?prefix\s*=\s*local\.workflow_prefix')
 
         self.assertRegex(ent_vars, r'variable\s+"enable_pubsub_stream"[\s\S]*?default\s*=\s*false')
         for example_rel in (

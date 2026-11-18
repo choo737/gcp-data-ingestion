@@ -80,7 +80,7 @@ locals {
   workflow_prefix     = local.trimmed_domain_name != "" ? "${var.prefix}-${local.trimmed_domain_name}" : var.prefix
   pubsub_stream_name  = local.trimmed_domain_name != "" ? "${local.trimmed_domain_name}-orders" : "pos-orders"
 
-  any_pubsub_enabled     = var.enable_pubsub_stream || length(var.pubsub_streams) > 0
+  any_pubsub_enabled     = var.enable_pubsub_stream || length(var.pubsub_streams) > 0 || var.enable_pipeline_workflow
   any_batch_enabled      = var.enable_batch_job || length(var.batch_jobs) > 0
   any_datastream_enabled = var.enable_datastream_cdc || var.enable_shared_datastream_private_connection || length(var.datastream_streams) > 0
 
@@ -320,7 +320,7 @@ module "batch_elt_job" {
   bronze_dataset_id            = var.bronze_dataset_id
   landing_bucket_name          = var.landing_bucket_name
   region                       = var.region
-  prefix                       = var.prefix
+  prefix                       = local.workflow_prefix
   container_image              = local.effective_batch_image
   source_prefix                = var.batch_source_prefix
   target_table                 = var.batch_target_table
