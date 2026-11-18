@@ -76,6 +76,10 @@ locals {
 
   effective_labels = merge({ environment = var.environment, managed_by = "terraform" }, var.labels)
 
+  trimmed_domain_name = var.domain_name != null ? trimspace(var.domain_name) : ""
+  workflow_prefix     = local.trimmed_domain_name != "" ? "${var.prefix}-${local.trimmed_domain_name}" : var.prefix
+  pubsub_stream_name  = local.trimmed_domain_name != "" ? "${local.trimmed_domain_name}-orders" : "pos-orders"
+
   any_pubsub_enabled     = var.enable_pubsub_stream || length(var.pubsub_streams) > 0
   any_batch_enabled      = var.enable_batch_job || length(var.batch_jobs) > 0
   any_datastream_enabled = var.enable_datastream_cdc || var.enable_shared_datastream_private_connection || length(var.datastream_streams) > 0
@@ -196,7 +200,7 @@ resource "time_sleep" "service_identity_propagation" {
 }
 
 resource "google_kms_crypto_key_iam_member" "pubsub_cmek" {
-  count = local.use_cmek && local.any_pubsub_enabled ? 1 : 0
+  count = local.use_cmek && var.manage_kms_iam && local.any_pubsub_enabled ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -206,7 +210,7 @@ resource "google_kms_crypto_key_iam_member" "pubsub_cmek" {
 }
 
 resource "google_kms_crypto_key_iam_member" "datastream_cmek" {
-  count = local.use_cmek && local.any_datastream_enabled ? 1 : 0
+  count = local.use_cmek && var.manage_kms_iam && local.any_datastream_enabled ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -216,7 +220,7 @@ resource "google_kms_crypto_key_iam_member" "datastream_cmek" {
 }
 
 resource "google_kms_crypto_key_iam_member" "workflows_cmek" {
-  count = local.use_cmek && var.enable_pipeline_workflow ? 1 : 0
+  count = local.use_cmek && var.manage_kms_iam && var.enable_pipeline_workflow ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -226,7 +230,7 @@ resource "google_kms_crypto_key_iam_member" "workflows_cmek" {
 }
 
 resource "google_kms_crypto_key_iam_member" "run_cmek" {
-  count = local.use_cmek && local.any_batch_enabled ? 1 : 0
+  count = local.use_cmek && var.manage_kms_iam && local.any_batch_enabled ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -287,7 +291,7 @@ module "pubsub_bigquery" {
   project_id                   = local.effective_compute_project_id
   region                       = var.region
   prefix                       = var.prefix
-  stream_name                  = "pos-orders"
+  stream_name                  = local.pubsub_stream_name
   bronze_project_id            = local.effective_core_project_id
   bronze_dataset_id            = var.bronze_dataset_id
   pubsub_project_number        = data.google_project.etl.number
@@ -323,6 +327,7 @@ module "batch_elt_job" {
   source_format                = var.batch_source_format
   service_account_email        = local.raw_batch_loader_sa
   kms_key_id                   = local.effective_kms_key_id
+  manage_kms_iam               = var.manage_kms_iam
   pii_restricted_policy_tag_id = local.effective_pii_restricted_tag
   pii_masked_policy_tag_id     = local.effective_pii_masked_tag
   vpc_id                       = local.effective_vpc_id
@@ -394,6 +399,7 @@ module "batch_jobs" {
   max_retries                  = each.value.max_retries
   timeout                      = each.value.timeout
   kms_key_id                   = local.effective_kms_key_id
+  manage_kms_iam               = var.manage_kms_iam
   pii_restricted_policy_tag_id = local.effective_pii_restricted_tag
   pii_masked_policy_tag_id     = local.effective_pii_masked_tag
   vpc_id                       = local.effective_vpc_id
@@ -500,7 +506,7 @@ module "pipeline_workflows" {
   gold_dataset_id                = local.effective_gold_dataset_id
   assertions_dataset_id          = local.effective_assertions_ds
   region                         = var.region
-  prefix                         = var.prefix
+  prefix                         = local.workflow_prefix
   ops_telemetry_dataset_id       = local.effective_ops_telemetry_ds
   dataform_repository_name       = var.dataform_repository_name
   dataform_release_config_name   = local.effective_df_release_config

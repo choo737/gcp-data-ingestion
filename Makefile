@@ -1,5 +1,6 @@
 ENV ?= dev
 STAGE ?= enterprise
+DOMAIN_NAME ?=
 TFSTATE_BUCKET ?=
 TF_STATE_BUCKET ?=
 VAR_FILE ?=
@@ -12,9 +13,9 @@ ROOTS := \
 
 NORMALIZED_STAGE := $(patsubst stages/%,%,$(STAGE))
 STAGE_DIR := stages/$(NORMALIZED_STAGE)
-BACKEND_PREFIX := ingestion/$(NORMALIZED_STAGE)/$(ENV)
+BACKEND_PREFIX := $(if $(strip $(DOMAIN_NAME)),ingestion/$(strip $(DOMAIN_NAME))/$(NORMALIZED_STAGE)/$(ENV),ingestion/$(NORMALIZED_STAGE)/$(ENV))
 
-export ENV TFSTATE_BUCKET TF_STATE_BUCKET STAGE VAR_FILE
+export ENV TFSTATE_BUCKET TF_STATE_BUCKET STAGE DOMAIN_NAME VAR_FILE
 
 .PHONY: fmt fmt-check validate init plan apply test clean
 
@@ -40,6 +41,10 @@ init:
 		dev|staging|prod) ;; \
 		*) echo "Invalid ENV: $(ENV)" >&2; exit 1 ;; \
 	esac; \
+	if [ -n "$(strip $(DOMAIN_NAME))" ] && ! printf '%s' "$(strip $(DOMAIN_NAME))" | grep -Eq '^[a-z][a-z0-9-]{0,19}[a-z0-9]$$'; then \
+		echo "Invalid DOMAIN_NAME: $(DOMAIN_NAME)" >&2; \
+		exit 1; \
+	fi; \
 	if [ -z "$(EFFECTIVE_STATE_BUCKET)" ]; then \
 		echo "Set TFSTATE_BUCKET or TF_STATE_BUCKET=<gcs-bucket> before running make init" >&2; \
 		exit 1; \

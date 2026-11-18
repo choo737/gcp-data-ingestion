@@ -80,7 +80,7 @@ resource "google_project_iam_member" "compute_job_user" {
 }
 
 resource "google_kms_crypto_key_iam_member" "batch_loader_cmek" {
-  count = local.effective_kms_key_id != "" ? 1 : 0
+  count = local.effective_kms_key_id != "" && var.manage_kms_iam ? 1 : 0
 
   crypto_key_id = local.effective_kms_key_id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"

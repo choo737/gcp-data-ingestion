@@ -99,6 +99,12 @@ variable "kms_key_id" {
   description = "Optional regional Cloud KMS key ID for BigQuery loads and Cloud Run."
 }
 
+variable "manage_kms_iam" {
+  type        = bool
+  default     = true
+  description = "Whether Terraform grants Cloud KMS EncrypterDecrypter IAM to the batch loader service account."
+}
+
 variable "delete_contents_on_destroy" {
   type        = bool
   default     = false

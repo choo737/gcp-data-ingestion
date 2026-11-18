@@ -4,9 +4,9 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  link-stages.sh [--env <env>] [--tfstate-bucket <bucket>] <source_stage_dir> [<source_stage_dir> ...] <target_stage_dir>
-  link-stages.sh [--env <env>] [--tfstate-bucket <bucket>] --export-gcs <gs://bucket/path.json> <source_stage_dir> [<source_stage_dir> ...]
-  link-stages.sh [--env <env>] --from-gcs <gs://bucket/path.json> [<gs://bucket/path2.json> ...] <target_stage_dir>
+  link-stages.sh [--env <env>] [--domain-name <domain>] [--tfstate-bucket <bucket>] <source_stage_dir> [<source_stage_dir> ...] <target_stage_dir>
+  link-stages.sh [--env <env>] [--domain-name <domain>] [--tfstate-bucket <bucket>] --export-gcs <gs://bucket/path.json> <source_stage_dir> [<source_stage_dir> ...]
+  link-stages.sh [--env <env>] [--domain-name <domain>] --from-gcs <gs://bucket/path.json> [<gs://bucket/path2.json> ...] <target_stage_dir>
 EOF
 }
 
@@ -28,6 +28,8 @@ BUCKET_RE='^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$'
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 env_name=""
+domain_name="${DOMAIN_NAME:-}"
+domain_name_explicit=false
 tfstate_bucket="${TFSTATE_BUCKET:-${GCP_TFSTATE_BUCKET:-${TF_STATE_BUCKET:-}}}"
 tfstate_bucket_explicit=false
 mode="local"
@@ -45,6 +47,20 @@ while [ "$#" -gt 0 ]; do
       env_name="${1#--env=}"
       if [ -z "$env_name" ] || [[ "$env_name" == -* ]]; then
         die_usage "Missing or empty value for --env"
+      fi
+      shift
+      ;;
+    --domain-name)
+      require_flag_value "$1" "$#" "${2:-}"
+      domain_name="$2"
+      domain_name_explicit=true
+      shift 2
+      ;;
+    --domain-name=*)
+      domain_name="${1#--domain-name=}"
+      domain_name_explicit=true
+      if [ -z "$domain_name" ] || [[ "$domain_name" == -* ]]; then
+        die_usage "Missing or empty value for --domain-name"
       fi
       shift
       ;;
@@ -102,6 +118,14 @@ if [ -n "$env_name" ]; then
   fi
 fi
 
+if [ -n "$domain_name" ]; then
+  if [[ ! "$domain_name" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+    die_usage "Invalid --domain-name value: ${domain_name}"
+  fi
+elif [ "$domain_name_explicit" = true ]; then
+  die_usage "Missing or empty value for --domain-name"
+fi
+
 if [ -n "$tfstate_bucket" ]; then
   if [[ ! "$tfstate_bucket" =~ $BUCKET_RE ]]; then
     die_usage "Invalid --tfstate-bucket value: ${tfstate_bucket}"
@@ -155,7 +179,7 @@ if [ "$mode" = "export-gcs" ]; then
     echo "Invalid GCS URI: $gcs_uri" >&2
     exit 1
   fi
-  python3 - "$env_name" "$gcs_uri" "$tfstate_bucket" "$REPO_ROOT" "${source_dirs[@]}" <<'PY'
+  python3 - "$env_name" "$gcs_uri" "$tfstate_bucket" "$REPO_ROOT" "$domain_name" "${source_dirs[@]}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -168,7 +192,8 @@ env_name = sys.argv[1]
 raw_gcs_uri = sys.argv[2]
 tfstate_bucket = sys.argv[3]
 repo_root = Path(sys.argv[4]).resolve()
-raw_sources = sys.argv[5:]
+domain_name = sys.argv[5]
+raw_sources = sys.argv[6:]
 
 
 def resolve_env_gcs_uri(uri: str, env: str) -> str:
@@ -212,6 +237,8 @@ def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
             rel_stage = cleaned
     if rel_stage.startswith("stages/"):
         rel_stage = rel_stage[len("stages/"):]
+    if domain_name:
+        return f"ingestion/{domain_name}/{rel_stage}/{env}"
     return f"ingestion/{rel_stage}/{env}"
 
 
@@ -305,7 +332,7 @@ if [ "$mode" = "from-gcs" ]; then
       exit 1
     fi
   done
-  python3 - "$env_name" "$target_abs" "$out_file" "${gcs_uris[@]}" <<'PY'
+  python3 - "$env_name" "$target_abs" "$out_file" "$domain_name" "${gcs_uris[@]}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -317,7 +344,8 @@ import sys
 env_name = sys.argv[1]
 target_dir = Path(sys.argv[2])
 out_file = Path(sys.argv[3])
-raw_uris = sys.argv[4:]
+domain_name = sys.argv[4]
+raw_uris = sys.argv[5:]
 
 
 def resolve_env_gcs_uri(uri: str, env: str) -> str:
@@ -378,6 +406,8 @@ for uri in gcs_uris:
 
 if env_name and "environment" in declared_vars and "environment" not in merged:
     merged["environment"] = env_name
+if domain_name and "domain_name" in declared_vars and "domain_name" not in merged:
+    merged["domain_name"] = domain_name
 
 tmp_file = out_file.with_name(f".{out_file.name}.{os.getpid()}.tmp")
 fd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -396,7 +426,7 @@ PY
   exit 0
 fi
 
-python3 - "$env_name" "$target_abs" "$out_file" "$tfstate_bucket" "$REPO_ROOT" "${source_dirs[@]}" <<'PY'
+python3 - "$env_name" "$target_abs" "$out_file" "$tfstate_bucket" "$REPO_ROOT" "$domain_name" "${source_dirs[@]}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -409,7 +439,8 @@ target_dir = Path(sys.argv[2])
 out_file = Path(sys.argv[3])
 tfstate_bucket = sys.argv[4]
 repo_root = Path(sys.argv[5]).resolve()
-raw_sources = sys.argv[6:]
+domain_name = sys.argv[6]
+raw_sources = sys.argv[7:]
 
 var_re = re.compile(r'^\s*variable\s+"([A-Za-z0-9_]+)"\s*\{', re.MULTILINE)
 declared_vars = set(var_re.findall((target_dir / "variables.tf").read_text(encoding="utf-8")))
@@ -428,6 +459,8 @@ def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
             rel_stage = cleaned
     if rel_stage.startswith("stages/"):
         rel_stage = rel_stage[len("stages/"):]
+    if domain_name:
+        return f"ingestion/{domain_name}/{rel_stage}/{env}"
     return f"ingestion/{rel_stage}/{env}"
 
 
@@ -495,6 +528,8 @@ for raw_src in raw_sources:
 
 if env_name and "environment" in declared_vars and "environment" not in merged:
     merged["environment"] = env_name
+if domain_name and "domain_name" in declared_vars and "domain_name" not in merged:
+    merged["domain_name"] = domain_name
 
 tmp_file = out_file.with_name(f".{out_file.name}.{os.getpid()}.tmp")
 fd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

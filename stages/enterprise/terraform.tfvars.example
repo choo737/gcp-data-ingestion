@@ -1,6 +1,6 @@
 # Link upstream gcp-foundation outputs into 00_linked.auto.tfvars.json before apply.
 # Use custom.auto.tfvars for overrides without committing real project IDs.
-enable_pubsub_stream        = true
+enable_pubsub_stream        = false
 enable_batch_job            = false
 enable_datastream_cdc       = false
 enable_pipeline_workflow    = true

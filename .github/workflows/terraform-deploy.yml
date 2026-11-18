@@ -28,6 +28,11 @@ on:
           - dev
           - staging
           - prod
+      domain_name:
+        description: Optional business-unit domain slug for multi-BU state namespacing
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -83,26 +88,47 @@ jobs:
         if: vars.IAC_OUTPUTS_BUCKET != ''
         env:
           IAC_OUTPUTS_BUCKET: ${{ vars.IAC_OUTPUTS_BUCKET }}
+          DOMAIN_NAME: ${{ inputs.domain_name || vars.DOMAIN_NAME || '' }}
         run: |
           if [[ ! "${IAC_OUTPUTS_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
             echo "Invalid IAC_OUTPUTS_BUCKET" >&2
             exit 1
           fi
-          ./scripts/link-stages.sh --env dev \
-            --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
-            stages/enterprise
+          if [ -n "${DOMAIN_NAME}" ]; then
+            if [[ ! "${DOMAIN_NAME}" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+              echo "Invalid DOMAIN_NAME" >&2
+              exit 1
+            fi
+            ./scripts/link-stages.sh --env dev --domain-name "${DOMAIN_NAME}" \
+              --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
+              stages/enterprise
+          else
+            ./scripts/link-stages.sh --env dev \
+              --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
+              stages/enterprise
+          fi
 
       - name: Terraform init and apply (dev)
         env:
           TF_STATE_BUCKET: ${{ vars.GCP_TFSTATE_BUCKET || vars.TF_STATE_BUCKET }}
+          DOMAIN_NAME: ${{ inputs.domain_name || vars.DOMAIN_NAME || '' }}
         run: |
           if [[ ! "${TF_STATE_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
             echo "Invalid TF_STATE_BUCKET" >&2
             exit 1
           fi
+          if [ -n "${DOMAIN_NAME}" ]; then
+            if [[ ! "${DOMAIN_NAME}" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+              echo "Invalid DOMAIN_NAME" >&2
+              exit 1
+            fi
+            BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/dev"
+          else
+            BACKEND_PREFIX="ingestion/enterprise/dev"
+          fi
           terraform -chdir=stages/enterprise init -reconfigure \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
-            -backend-config="prefix=ingestion/enterprise/dev"
+            -backend-config="prefix=${BACKEND_PREFIX}"
           if [ -f stages/enterprise/envs/dev.tfvars ]; then
             terraform -chdir=stages/enterprise apply -auto-approve -var-file=envs/dev.tfvars
           else
@@ -145,26 +171,47 @@ jobs:
         if: vars.IAC_OUTPUTS_BUCKET != ''
         env:
           IAC_OUTPUTS_BUCKET: ${{ vars.IAC_OUTPUTS_BUCKET }}
+          DOMAIN_NAME: ${{ inputs.domain_name || vars.DOMAIN_NAME || '' }}
         run: |
           if [[ ! "${IAC_OUTPUTS_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
             echo "Invalid IAC_OUTPUTS_BUCKET" >&2
             exit 1
           fi
-          ./scripts/link-stages.sh --env staging \
-            --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
-            stages/enterprise
+          if [ -n "${DOMAIN_NAME}" ]; then
+            if [[ ! "${DOMAIN_NAME}" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+              echo "Invalid DOMAIN_NAME" >&2
+              exit 1
+            fi
+            ./scripts/link-stages.sh --env staging --domain-name "${DOMAIN_NAME}" \
+              --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
+              stages/enterprise
+          else
+            ./scripts/link-stages.sh --env staging \
+              --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
+              stages/enterprise
+          fi
 
       - name: Terraform init and apply (staging)
         env:
           TF_STATE_BUCKET: ${{ vars.GCP_TFSTATE_BUCKET || vars.TF_STATE_BUCKET }}
+          DOMAIN_NAME: ${{ inputs.domain_name || vars.DOMAIN_NAME || '' }}
         run: |
           if [[ ! "${TF_STATE_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
             echo "Invalid TF_STATE_BUCKET" >&2
             exit 1
           fi
+          if [ -n "${DOMAIN_NAME}" ]; then
+            if [[ ! "${DOMAIN_NAME}" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+              echo "Invalid DOMAIN_NAME" >&2
+              exit 1
+            fi
+            BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/staging"
+          else
+            BACKEND_PREFIX="ingestion/enterprise/staging"
+          fi
           terraform -chdir=stages/enterprise init -reconfigure \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
-            -backend-config="prefix=ingestion/enterprise/staging"
+            -backend-config="prefix=${BACKEND_PREFIX}"
           if [ -f stages/enterprise/envs/staging.tfvars ]; then
             terraform -chdir=stages/enterprise apply -auto-approve -var-file=envs/staging.tfvars
           else
@@ -205,26 +252,47 @@ jobs:
         if: vars.IAC_OUTPUTS_BUCKET != ''
         env:
           IAC_OUTPUTS_BUCKET: ${{ vars.IAC_OUTPUTS_BUCKET }}
+          DOMAIN_NAME: ${{ inputs.domain_name || vars.DOMAIN_NAME || '' }}
         run: |
           if [[ ! "${IAC_OUTPUTS_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
             echo "Invalid IAC_OUTPUTS_BUCKET" >&2
             exit 1
           fi
-          ./scripts/link-stages.sh --env prod \
-            --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
-            stages/enterprise
+          if [ -n "${DOMAIN_NAME}" ]; then
+            if [[ ! "${DOMAIN_NAME}" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+              echo "Invalid DOMAIN_NAME" >&2
+              exit 1
+            fi
+            ./scripts/link-stages.sh --env prod --domain-name "${DOMAIN_NAME}" \
+              --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
+              stages/enterprise
+          else
+            ./scripts/link-stages.sh --env prod \
+              --from-gcs "gs://${IAC_OUTPUTS_BUCKET}/foundation-outputs.json" \
+              stages/enterprise
+          fi
 
       - name: Terraform init and apply (prod)
         env:
           TF_STATE_BUCKET: ${{ vars.GCP_TFSTATE_BUCKET || vars.TF_STATE_BUCKET }}
+          DOMAIN_NAME: ${{ inputs.domain_name || vars.DOMAIN_NAME || '' }}
         run: |
           if [[ ! "${TF_STATE_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]]; then
             echo "Invalid TF_STATE_BUCKET" >&2
             exit 1
           fi
+          if [ -n "${DOMAIN_NAME}" ]; then
+            if [[ ! "${DOMAIN_NAME}" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+              echo "Invalid DOMAIN_NAME" >&2
+              exit 1
+            fi
+            BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/prod"
+          else
+            BACKEND_PREFIX="ingestion/enterprise/prod"
+          fi
           terraform -chdir=stages/enterprise init -reconfigure \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
-            -backend-config="prefix=ingestion/enterprise/prod"
+            -backend-config="prefix=${BACKEND_PREFIX}"
           if [ -f stages/enterprise/envs/prod.tfvars ]; then
             terraform -chdir=stages/enterprise apply -auto-approve -var-file=envs/prod.tfvars
           else

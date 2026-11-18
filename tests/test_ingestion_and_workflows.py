@@ -1374,6 +1374,141 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             )
             self.assertNotEqual(bad_stage.returncode, 0)
 
+            # Verify DOMAIN_NAME backend prefix namespacing and validation in Makefile.
+            log_file.unlink()
+            dom_res = subprocess.run(
+                [
+                    "make",
+                    "init",
+                    "STAGE=enterprise",
+                    "ENV=dev",
+                    "DOMAIN_NAME=retail",
+                    "TFSTATE_BUCKET=my-bucket",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(dom_res.returncode, 0, dom_res.stdout + dom_res.stderr)
+            dom_calls = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertIn("-backend-config=prefix=ingestion/retail/enterprise/dev", dom_calls[0])
+
+            bad_dom = subprocess.run(
+                ["make", "init", "STAGE=enterprise", "DOMAIN_NAME=BAD_DOMAIN!", "TFSTATE_BUCKET=my-bucket"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_dom.returncode, 0)
+
+    def test_decisions_2_3_4_manage_kms_iam_domain_name_pubsub_default_and_ci(self) -> None:
+        ent_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
+        ent_main = (REPO_ROOT / "stages/enterprise/main.tf").read_text(encoding="utf-8")
+        batch_vars = (REPO_ROOT / "modules/ingestion/batch-elt-job/variables.tf").read_text(encoding="utf-8")
+        batch_main = (REPO_ROOT / "modules/ingestion/batch-elt-job/main.tf").read_text(encoding="utf-8")
+
+        self.assertIn('variable "manage_kms_iam"', ent_vars)
+        self.assertIn('variable "manage_kms_iam"', batch_vars)
+        self.assertIn("local.use_cmek && var.manage_kms_iam", ent_main)
+        self.assertIn("local.effective_kms_key_id != \"\" && var.manage_kms_iam", batch_main)
+        self.assertEqual(ent_main.count("manage_kms_iam               = var.manage_kms_iam"), 2)
+
+        self.assertIn('variable "domain_name"', ent_vars)
+        self.assertIn("local.workflow_prefix", ent_main)
+        self.assertIn("local.pubsub_stream_name", ent_main)
+
+        self.assertRegex(ent_vars, r'variable\s+"enable_pubsub_stream"[\s\S]*?default\s*=\s*false')
+        for example_rel in (
+            "stages/enterprise/terraform.tfvars.example",
+            "stages/enterprise/envs/dev.tfvars.example",
+            "stages/enterprise/envs/staging.tfvars.example",
+            "stages/enterprise/envs/prod.tfvars.example",
+        ):
+            ex_text = (REPO_ROOT / example_rel).read_text(encoding="utf-8")
+            self.assertRegex(ex_text, r"enable_pubsub_stream\s*=\s*false", f"{example_rel} should default enable_pubsub_stream = false")
+
+        deploy_wf = (REPO_ROOT / ".github/workflows/terraform-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("domain_name:", deploy_wf)
+        self.assertIn('BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/', deploy_wf)
+
+        build_wf = (REPO_ROOT / ".github/workflows/build-batch-loader.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            build_wf.count("(vars.GCP_WIF_SERVICE_ACCOUNT != '' || vars.GCP_SERVICE_ACCOUNT != '')"),
+            5,
+        )
+
+        guide = (REPO_ROOT / "docs/03-enterprise-adoption-guide.md").read_text(encoding="utf-8")
+        self.assertIn("gs://<iac-outputs-bucket>/foundation-outputs.json", guide)
+
+        # Verify link-stages.sh --domain-name namespacing in local mode and bad --domain-name rejection.
+        script_path = REPO_ROOT / "scripts/link-stages.sh"
+        bad_dom_link = subprocess.run(
+            [str(script_path), "--domain-name", "BAD!", "stages/enterprise", "stages/enterprise"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(bad_dom_link.returncode, 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            src = tmp_path / "stages" / "enterprise"
+            (src / "envs").mkdir(parents=True)
+            dst = tmp_path / "dst"
+            dst.mkdir()
+            (dst / "variables.tf").write_text(
+                'variable "environment" {\n  type = string\n}\n'
+                'variable "domain_name" {\n  type = string\n}\n'
+                'variable "kms_key_id" {\n  type = string\n}\n',
+                encoding="utf-8",
+            )
+            call_log = tmp_path / "tf_calls.log"
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(args) + '\\n')\n"
+                "if 'output' in args:\n"
+                "    print(json.dumps({'kms_key_id': {'value': 'k1'}}))\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["TF_CALL_LOG"] = str(call_log)
+            res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--domain-name",
+                    "retail",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    "stages/enterprise",
+                    str(dst),
+                ],
+                cwd=tmp_path,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            calls = call_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("-backend-config=prefix=ingestion/retail/enterprise/dev", calls[0])
+            linked = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(linked["domain_name"], "retail")
+
 
 if __name__ == "__main__":
     unittest.main()

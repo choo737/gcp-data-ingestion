@@ -87,7 +87,7 @@ Pull non-sensitive outputs exported by `gcp-foundation` per environment:
 
 ```bash
 ./scripts/link-stages.sh --env dev \
-  --from-gcs gs://<state-bucket>/foundation-dev.json \
+  --from-gcs gs://<iac-outputs-bucket>/foundation-outputs.json \
   stages/enterprise
 ```
 

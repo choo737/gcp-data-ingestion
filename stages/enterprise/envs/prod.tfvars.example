@@ -2,7 +2,7 @@
 # Pin batch_container_image to an immutable @sha256 digest produced by build-batch-loader.yml.
 environment                 = "prod"
 prefix                      = "ent"
-enable_pubsub_stream        = true
+enable_pubsub_stream        = false
 pubsub_schema_type          = "PROTOCOL_BUFFER"
 enable_batch_job            = true
 batch_container_image       = "asia-southeast1-docker.pkg.dev/example-etl-project/ent-containers/gcs-to-bronze@sha256:0000000000000000000000000000000000000000000000000000000000000000"

@@ -2,7 +2,7 @@
 # Store project-specific overrides inside untracked custom.auto.tfvars.
 environment                 = "dev"
 prefix                      = "ent-dev"
-enable_pubsub_stream        = true
+enable_pubsub_stream        = false
 pubsub_schema_type          = "PROTOCOL_BUFFER"
 enable_batch_job            = false
 batch_vpc_egress            = "PRIVATE_RANGES_ONLY"

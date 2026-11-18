@@ -2,7 +2,7 @@
 # Replace the placeholder container image URI with your Artifact Registry @sha256 digest.
 environment                 = "staging"
 prefix                      = "ent-stg"
-enable_pubsub_stream        = true
+enable_pubsub_stream        = false
 pubsub_schema_type          = "PROTOCOL_BUFFER"
 enable_batch_job            = true
 batch_container_image       = "asia-southeast1-docker.pkg.dev/example-etl-project/ent-containers/gcs-to-bronze:staging"

@@ -169,6 +169,12 @@ variable "kms_key_name" {
   description = "Alias for kms_key_id linked from gcp-foundation."
 }
 
+variable "manage_kms_iam" {
+  type        = bool
+  default     = true
+  description = "Whether Terraform manages Cloud KMS IAM bindings on kms_key_id."
+}
+
 variable "pii_restricted_policy_tag_id" {
   type        = string
   default     = ""
@@ -252,6 +258,17 @@ variable "prefix" {
   description = "Naming prefix matching the upstream gcp-foundation deployment."
 }
 
+variable "domain_name" {
+  type        = string
+  default     = ""
+  description = "Optional business-unit domain slug for multi-BU ingestion state and resource namespacing."
+
+  validation {
+    condition     = var.domain_name == "" || can(regex("^[a-z][a-z0-9-]{0,19}[a-z0-9]$", var.domain_name))
+    error_message = "domain_name must be empty or 2-21 lowercase alphanumeric/hyphen chars starting with a letter and ending with alphanumeric."
+  }
+}
+
 variable "delete_contents_on_destroy" {
   type        = bool
   default     = false
@@ -260,7 +277,7 @@ variable "delete_contents_on_destroy" {
 
 variable "enable_pubsub_stream" {
   type        = bool
-  default     = true
+  default     = false
   description = "Whether to provision schema-validated Pub/Sub BigQuery streaming and DLQ."
 }
 
