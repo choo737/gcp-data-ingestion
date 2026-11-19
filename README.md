@@ -82,7 +82,7 @@ Follow [docs/03-enterprise-adoption-guide.md](docs/03-enterprise-adoption-guide.
 
 ```bash
 # Greenfield Day-1 link from gcp-foundation GCS export:
-./scripts/link-stages.sh --env prod --from-gcs gs://example-platform-state/foundation-prod.json stages/enterprise
+./scripts/link-stages.sh --env prod --from-gcs gs://example-platform-state/foundation-outputs.json stages/enterprise
 
 # Brownfield Day-1 link from gcp-launchpad platform-context.json:
 python3 ../gcp-launchpad/scripts/generate-brownfield-link.py \

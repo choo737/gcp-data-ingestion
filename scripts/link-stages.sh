@@ -226,17 +226,37 @@ def resolve_env_gcs_uri(uri: str, env: str) -> str:
     return f"gs://{bucket}/{env}/{filename}"
 
 
+def find_repo_root(stage_abs: Path) -> Path | None:
+    for candidate in (stage_abs, *stage_abs.parents):
+        if candidate == candidate.parent:
+            break
+        if (candidate / ".git").exists():
+            return candidate
+    for candidate in stage_abs.parents:
+        if candidate == candidate.parent:
+            break
+        if candidate.name in ("stages", "foundation", "data"):
+            return candidate.parent
+    return None
+
+
 def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
+    resolved_src = src_abs.resolve()
     try:
-        rel_stage = src_abs.resolve().relative_to(repo_root).as_posix()
+        rel_stage = resolved_src.relative_to(repo_root).as_posix()
+        is_internal = True
     except ValueError:
-        cleaned = raw_src.rstrip("/")
-        if cleaned.startswith("./"):
-            cleaned = cleaned[2:]
-        if Path(raw_src).is_absolute():
-            rel_stage = f"stages/{src_abs.name}" if src_abs.parent.name == "stages" else src_abs.name
+        ext_root = find_repo_root(resolved_src)
+        if ext_root is not None:
+            rel_stage = resolved_src.relative_to(ext_root).as_posix()
         else:
-            rel_stage = cleaned
+            rel_stage = resolved_src.name
+        is_internal = (
+            rel_stage.startswith("stages/")
+            and (ext_root is None or ext_root.name != "gcp-data-science")
+        )
+    if not is_internal:
+        return f"{rel_stage}/{env}"
     if rel_stage.startswith("stages/"):
         rel_stage = rel_stage[len("stages/"):]
     if domain_name:
@@ -450,17 +470,37 @@ var_re = re.compile(r'^\s*variable\s+"([A-Za-z0-9_]+)"\s*\{', re.MULTILINE)
 declared_vars = set(var_re.findall((target_dir / "variables.tf").read_text(encoding="utf-8")))
 
 
+def find_repo_root(stage_abs: Path) -> Path | None:
+    for candidate in (stage_abs, *stage_abs.parents):
+        if candidate == candidate.parent:
+            break
+        if (candidate / ".git").exists():
+            return candidate
+    for candidate in stage_abs.parents:
+        if candidate == candidate.parent:
+            break
+        if candidate.name in ("stages", "foundation", "data"):
+            return candidate.parent
+    return None
+
+
 def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
+    resolved_src = src_abs.resolve()
     try:
-        rel_stage = src_abs.resolve().relative_to(repo_root).as_posix()
+        rel_stage = resolved_src.relative_to(repo_root).as_posix()
+        is_internal = True
     except ValueError:
-        cleaned = raw_src.rstrip("/")
-        if cleaned.startswith("./"):
-            cleaned = cleaned[2:]
-        if Path(raw_src).is_absolute():
-            rel_stage = f"stages/{src_abs.name}" if src_abs.parent.name == "stages" else src_abs.name
+        ext_root = find_repo_root(resolved_src)
+        if ext_root is not None:
+            rel_stage = resolved_src.relative_to(ext_root).as_posix()
         else:
-            rel_stage = cleaned
+            rel_stage = resolved_src.name
+        is_internal = (
+            rel_stage.startswith("stages/")
+            and (ext_root is None or ext_root.name != "gcp-data-science")
+        )
+    if not is_internal:
+        return f"{rel_stage}/{env}"
     if rel_stage.startswith("stages/"):
         rel_stage = rel_stage[len("stages/"):]
     if domain_name:

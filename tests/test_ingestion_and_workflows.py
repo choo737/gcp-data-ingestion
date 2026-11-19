@@ -1511,6 +1511,40 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             linked = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
             self.assertEqual(linked["domain_name"], "retail")
 
+            # Verify resolve_backend_prefix handles internal stages/enterprise and external ../gcp-foundation/data/enterprise/01-platform.
+            ext_foundation = tmp_path / "gcp-foundation"
+            ext_stage = ext_foundation / "data" / "enterprise" / "01-platform"
+            (ext_foundation / ".git").mkdir(parents=True)
+            (ext_stage / "envs").mkdir(parents=True)
+            work_sub = tmp_path / "runner"
+            work_sub.mkdir()
+            call_log.unlink()
+            ext_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(REPO_ROOT / "stages/enterprise"),
+                    "../gcp-foundation/data/enterprise/01-platform",
+                    str(dst),
+                ],
+                cwd=work_sub,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(ext_res.returncode, 0, ext_res.stderr)
+            ext_calls = call_log.read_text(encoding="utf-8").splitlines()
+            init_lines = [line for line in ext_calls if " init " in line]
+            self.assertEqual(len(init_lines), 2)
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/dev", init_lines[0])
+            self.assertIn("-backend-config=prefix=data/enterprise/01-platform/dev", init_lines[1])
+            prefixes = re.findall(r"-backend-config=prefix=([^\s]+)", "\n".join(init_lines))
+            self.assertEqual(prefixes, ["ingestion/enterprise/dev", "data/enterprise/01-platform/dev"])
+
 
 if __name__ == "__main__":
     unittest.main()
