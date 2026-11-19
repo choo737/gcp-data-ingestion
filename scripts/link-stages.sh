@@ -244,24 +244,32 @@ def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
     resolved_src = src_abs.resolve()
     try:
         rel_stage = resolved_src.relative_to(repo_root).as_posix()
-        is_internal = True
+        in_self_repo = True
     except ValueError:
         ext_root = find_repo_root(resolved_src)
         if ext_root is not None:
             rel_stage = resolved_src.relative_to(ext_root).as_posix()
         else:
             rel_stage = resolved_src.name
-        is_internal = (
+        in_self_repo = (
             rel_stage.startswith("stages/")
             and (ext_root is None or ext_root.name != "gcp-data-science")
         )
-    if not is_internal:
-        return f"{rel_stage}/{env}"
+    if not in_self_repo:
+        effective_env = "shared" if rel_stage == "foundation/01-org-governance" else env
+        return f"{rel_stage}/{effective_env}"
     if rel_stage.startswith("stages/"):
         rel_stage = rel_stage[len("stages/"):]
     if domain_name:
         return f"ingestion/{domain_name}/{rel_stage}/{env}"
     return f"ingestion/{rel_stage}/{env}"
+
+
+def stage_uses_gcs_backend(stage_abs: Path) -> bool:
+    if (stage_abs / "envs").is_dir():
+        return True
+    versions_tf = stage_abs / "versions.tf"
+    return versions_tf.is_file() and 'backend "gcs"' in versions_tf.read_text(encoding="utf-8")
 
 
 def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, object]:
@@ -278,7 +286,7 @@ def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, o
     if env and (effective_src / "terraform.tfstate.d" / env).is_dir():
         cmd_env["TF_WORKSPACE"] = env
 
-    if env and state_bucket and (effective_src / "envs").is_dir():
+    if env and state_bucket and stage_uses_gcs_backend(effective_src):
         backend_prefix = resolve_backend_prefix(raw_src, effective_src.resolve(), env)
         subprocess.run(
             [
@@ -488,24 +496,32 @@ def resolve_backend_prefix(raw_src: str, src_abs: Path, env: str) -> str:
     resolved_src = src_abs.resolve()
     try:
         rel_stage = resolved_src.relative_to(repo_root).as_posix()
-        is_internal = True
+        in_self_repo = True
     except ValueError:
         ext_root = find_repo_root(resolved_src)
         if ext_root is not None:
             rel_stage = resolved_src.relative_to(ext_root).as_posix()
         else:
             rel_stage = resolved_src.name
-        is_internal = (
+        in_self_repo = (
             rel_stage.startswith("stages/")
             and (ext_root is None or ext_root.name != "gcp-data-science")
         )
-    if not is_internal:
-        return f"{rel_stage}/{env}"
+    if not in_self_repo:
+        effective_env = "shared" if rel_stage == "foundation/01-org-governance" else env
+        return f"{rel_stage}/{effective_env}"
     if rel_stage.startswith("stages/"):
         rel_stage = rel_stage[len("stages/"):]
     if domain_name:
         return f"ingestion/{domain_name}/{rel_stage}/{env}"
     return f"ingestion/{rel_stage}/{env}"
+
+
+def stage_uses_gcs_backend(stage_abs: Path) -> bool:
+    if (stage_abs / "envs").is_dir():
+        return True
+    versions_tf = stage_abs / "versions.tf"
+    return versions_tf.is_file() and 'backend "gcs"' in versions_tf.read_text(encoding="utf-8")
 
 
 def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, object]:
@@ -522,7 +538,7 @@ def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, o
     if env and (effective_src / "terraform.tfstate.d" / env).is_dir():
         cmd_env["TF_WORKSPACE"] = env
 
-    if env and state_bucket and (effective_src / "envs").is_dir():
+    if env and state_bucket and stage_uses_gcs_backend(effective_src):
         backend_prefix = resolve_backend_prefix(raw_src, effective_src.resolve(), env)
         subprocess.run(
             [

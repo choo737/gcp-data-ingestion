@@ -1545,6 +1545,43 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
             prefixes = re.findall(r"-backend-config=prefix=([^\s]+)", "\n".join(init_lines))
             self.assertEqual(prefixes, ["ingestion/enterprise/dev", "data/enterprise/01-platform/dev"])
 
+            # Verify --domain-name never prefixes external gcp-foundation stages and maps 01-org-governance to /shared.
+            ext_org_gov = ext_foundation / "foundation" / "01-org-governance"
+            ext_org_gov.mkdir(parents=True)
+            (ext_org_gov / "versions.tf").write_text('terraform {\n  backend "gcs" {}\n}\n', encoding="utf-8")
+            call_log.unlink()
+            dom_ext_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--domain-name",
+                    "retail",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(REPO_ROOT / "stages/enterprise"),
+                    "../gcp-foundation/foundation/01-org-governance",
+                    "../gcp-foundation/data/enterprise/01-platform",
+                    str(dst),
+                ],
+                cwd=work_sub,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(dom_ext_res.returncode, 0, dom_ext_res.stderr)
+            dom_ext_init_lines = [line for line in call_log.read_text(encoding="utf-8").splitlines() if " init " in line]
+            dom_ext_prefixes = re.findall(r"-backend-config=prefix=([^\s]+)", "\n".join(dom_ext_init_lines))
+            self.assertEqual(
+                dom_ext_prefixes,
+                [
+                    "ingestion/retail/enterprise/dev",
+                    "foundation/01-org-governance/shared",
+                    "data/enterprise/01-platform/dev",
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
