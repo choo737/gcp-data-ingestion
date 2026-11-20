@@ -168,7 +168,7 @@ Verify gcloud auth, collect intake values, link stages/enterprise, and add pipel
 
 - `.github/workflows/ci.yml`: Runs formatting, `terraform validate`, and Python unit tests on every push and PR.
 - `.github/workflows/build-batch-loader.yml`: Builds `jobs/gcs_to_bronze` with locked hashes and pushes immutable digests when WIF is set.
-- `.github/workflows/terraform-deploy.yml`: Plans pull requests and promotes `dev`, `staging`, and `prod` via GitHub Environments.
+- `.github/workflows/terraform-deploy.yml`: Plans pull requests and promotes `dev`, `uat`, `staging`, and `prod` via GitHub Environments.
 
 ## Repository Layout
 
@@ -176,7 +176,7 @@ Verify gcloud auth, collect intake values, link stages/enterprise, and add pipel
 - `modules/ingestion/`: Reusable five-file Terraform modules (`datastream-cdc`, `pubsub-bigquery`, `batch-elt-job`, `pipeline-workflows`).
 - `schemas/`: Reusable Proto3/Avro definitions (`schemas/pubsub/`) and BigQuery JSON schemas (`schemas/bigquery/`).
 - `stages/sandbox/`: Single-project stage with GCS remote backend and committed `.terraform.lock.hcl`.
-- `stages/enterprise/`: Multi-project stage with `envs/{dev,staging,prod}.tfvars.example` and committed `.terraform.lock.hcl`.
+- `stages/enterprise/`: Multi-project stage with `envs/{dev,uat,staging,prod}.tfvars.example` and committed `.terraform.lock.hcl`.
 - `jobs/gcs_to_bronze/`: Python `3.13` Cloud Run batch loader with pinned digest base image and `requirements.lock`.
 - `workflows/`: Cloud Workflows GA `v1` pipeline definition (`medallion_pipeline.workflows.yaml`).
 - `composer_reference/`: Reference Airflow DAG (`medallion_composer3_dag.py`) for Cloud Composer 3 scaling.

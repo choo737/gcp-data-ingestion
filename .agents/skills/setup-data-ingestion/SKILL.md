@@ -37,7 +37,10 @@ Ask the customer to select one deployment mode and stage:
 
 Confirm these inputs before editing `envs/<env>.tfvars`, `terraform.tfvars`, or `custom.auto.tfvars`:
 
-- `environment`, `region` (default `asia-southeast1`), `prefix`, and `delete_contents_on_destroy`.
+- `environment` (`dev`, `uat`, `staging`, `prod`), `region` (default `asia-southeast1`), `prefix`, and `delete_contents_on_destroy`.
+- Suggest a `3-6` lowercase char `prefix` acronym from core org words (strip `Ltd`, `Inc`, `Sdn`, `Bhd`) and confirm.
+- Write Section 1 upstream links to `stages/enterprise/00_linked.auto.tfvars.json` (`chmod 0600`).
+- Write Sections 2 to 4 pipeline settings to `stages/enterprise/envs/<env>.tfvars` (or `stages/sandbox/terraform.tfvars`).
 - Active baseline tracks: `enable_pubsub_stream`, `enable_batch_job`, `enable_datastream_cdc`, `enable_pipeline_workflow`.
 - Multi-pipeline catalogs: `pubsub_streams`, `batch_jobs`, `datastream_streams`, and `enable_shared_datastream_private_connection` with `schemas/`.
 - Batch image digest URI (`batch_container_image`) and `batch_vpc_egress` when `enable_batch_job = true` or `batch_jobs` is non-empty.

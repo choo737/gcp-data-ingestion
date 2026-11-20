@@ -1427,15 +1427,30 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
         for example_rel in (
             "stages/enterprise/terraform.tfvars.example",
             "stages/enterprise/envs/dev.tfvars.example",
+            "stages/enterprise/envs/uat.tfvars.example",
             "stages/enterprise/envs/staging.tfvars.example",
             "stages/enterprise/envs/prod.tfvars.example",
         ):
             ex_text = (REPO_ROOT / example_rel).read_text(encoding="utf-8")
             self.assertRegex(ex_text, r"enable_pubsub_stream\s*=\s*false", f"{example_rel} should default enable_pubsub_stream = false")
 
+        uat_example = (REPO_ROOT / "stages/enterprise/envs/uat.tfvars.example").read_text(encoding="utf-8")
+        self.assertRegex(uat_example, r'environment\s*=\s*"uat"')
+
         deploy_wf = (REPO_ROOT / ".github/workflows/terraform-deploy.yml").read_text(encoding="utf-8")
         self.assertIn("domain_name:", deploy_wf)
         self.assertIn('BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/', deploy_wf)
+        for uat_token in (
+            "- uat",
+            "apply-uat:",
+            "environment: uat",
+            "./scripts/link-stages.sh --env uat",
+            'BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/uat"',
+            'BACKEND_PREFIX="ingestion/enterprise/uat"',
+            "envs/uat.tfvars",
+            "envs/uat.tfvars.example",
+        ):
+            self.assertIn(uat_token, deploy_wf)
 
         build_wf = (REPO_ROOT / ".github/workflows/build-batch-loader.yml").read_text(encoding="utf-8")
         self.assertEqual(
@@ -1581,6 +1596,162 @@ class IngestionAndWorkflowsTest(unittest.TestCase):
                     "data/enterprise/01-platform/dev",
                 ],
             )
+
+            # Verify --env uat succeeds in local/GCS modes and non-.git apps/ fallback, while --env qa fails.
+            uat_src = tmp_path / "uat_stage"
+            (uat_src / "uat").mkdir(parents=True)
+            uat_tf = bin_dir / "terraform"
+            uat_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "print(json.dumps({'environment': {'value': 'uat', 'sensitive': False}, 'kms_key_id': {'value': 'k-uat'}}))\n",
+                encoding="utf-8",
+            )
+            uat_tf.chmod(0o755)
+            uat_res = subprocess.run(
+                [str(script_path), "--env", "uat", str(uat_src), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(uat_res.returncode, 0, uat_res.stderr)
+            uat_linked = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(uat_linked["environment"], "uat")
+            self.assertEqual(uat_linked["kms_key_id"], "k-uat")
+
+            apps_nogit = tmp_path / "nogit-apps" / "apps" / "enterprise"
+            (apps_nogit / "envs").mkdir(parents=True)
+            apps_tf = bin_dir / "terraform"
+            apps_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+                "if 'output' in sys.argv:\n"
+                "    print(json.dumps({'environment': {'value': 'uat', 'sensitive': False}, 'kms_key_id': {'value': 'k-uat'}}))\n",
+                encoding="utf-8",
+            )
+            apps_tf.chmod(0o755)
+            call_log.unlink()
+            apps_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "uat",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(apps_nogit),
+                    str(dst),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(apps_res.returncode, 0, apps_res.stderr)
+            apps_init = [l for l in call_log.read_text(encoding="utf-8").splitlines() if " init " in l]
+            self.assertTrue(any("-backend-config=prefix=apps/enterprise/uat" in l for l in apps_init), apps_init)
+
+            bad_env_res = subprocess.run(
+                [str(script_path), "--env", "qa", str(uat_src), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_env_res.returncode, 0)
+            self.assertIn("Invalid --env value: qa", bad_env_res.stderr)
+
+    def test_link_stages_prefers_data_subnet_id_in_local_and_gcs_modes(self) -> None:
+        script_path = REPO_ROOT / "scripts" / "link-stages.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            gcs_store = tmp_path / "gcs_store"
+            src_net = tmp_path / "02-security-network"
+            dst = tmp_path / "stages" / "enterprise"
+            for d in (bin_dir, gcs_store, src_net, dst):
+                d.mkdir(parents=True)
+
+            (dst / "variables.tf").write_text(
+                'variable "subnet_id" {\n  type = string\n}\n'
+                'variable "environment" {\n  type = string\n}\n',
+                encoding="utf-8",
+            )
+
+            base_sub = "projects/net/regions/asia-southeast1/subnetworks/base-sub"
+            data_sub = "projects/net/regions/asia-southeast1/subnetworks/data-sub"
+            ai_sub = "projects/net/regions/asia-southeast1/subnetworks/ai-sub"
+
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps({\n"
+                "  'environment': {'value': 'uat', 'sensitive': False},\n"
+                f"  'subnet_id': {{'value': {base_sub!r}, 'sensitive': False}},\n"
+                f"  'data_subnet_id': {{'value': {data_sub!r}, 'sensitive': False}},\n"
+                f"  'ai_subnet_id': {{'value': {ai_sub!r}, 'sensitive': False}},\n"
+                "}))\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+
+            gcloud_shim = bin_dir / "gcloud"
+            gcloud_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import shutil, sys\n"
+                f"store = Path({str(gcs_store)!r})\n"
+                "args = sys.argv[1:]\n"
+                "assert args[:2] == ['storage', 'cp']\n"
+                "src, dst_arg = args[2], args[3]\n"
+                "if dst_arg.startswith('gs://'):\n"
+                "    shutil.copyfile(src, store / dst_arg.replace('gs://', '').replace('/', '__'))\n"
+                "elif src.startswith('gs://') and dst_arg == '-':\n"
+                "    sys.stdout.write((store / src.replace('gs://', '').replace('/', '__')).read_text(encoding='utf-8'))\n",
+                encoding="utf-8",
+            )
+            gcloud_shim.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            local_res = subprocess.run(
+                [str(script_path), "--env", "uat", str(src_net), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(local_res.returncode, 0, local_res.stderr)
+            linked_local = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(linked_local["subnet_id"], data_sub)
+            self.assertEqual(linked_local["environment"], "uat")
+
+            (dst / "00_linked.auto.tfvars.json").unlink()
+            gcs_uri = "gs://example-state/foundation-outputs.json"
+            exp_res = subprocess.run(
+                [str(script_path), "--env", "uat", "--export-gcs", gcs_uri, str(src_net)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exp_res.returncode, 0, exp_res.stderr)
+
+            gcs_res = subprocess.run(
+                [str(script_path), "--env", "uat", "--from-gcs", gcs_uri, str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(gcs_res.returncode, 0, gcs_res.stderr)
+            linked_gcs = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(linked_gcs["subnet_id"], data_sub)
+            self.assertEqual(linked_gcs["environment"], "uat")
 
 
 if __name__ == "__main__":

@@ -112,7 +112,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -n "$env_name" ]; then
-  if [[ ! "$env_name" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]]; then
+  if [[ ! "$env_name" =~ ^(shared|dev|uat|staging|prod)$ ]]; then
     echo "Invalid --env value: $env_name" >&2
     exit 1
   fi
@@ -235,7 +235,7 @@ def find_repo_root(stage_abs: Path) -> Path | None:
     for candidate in stage_abs.parents:
         if candidate == candidate.parent:
             break
-        if candidate.name in ("stages", "foundation", "data"):
+        if candidate.name in ("stages", "foundation", "data", "apps"):
             return candidate.parent
     return None
 
@@ -414,6 +414,7 @@ var_re = re.compile(r'^\s*variable\s+"([A-Za-z0-9_]+)"\s*\{', re.MULTILINE)
 declared_vars = set(var_re.findall((target_dir / "variables.tf").read_text(encoding="utf-8")))
 
 merged: dict[str, object] = {}
+all_source_outputs: dict[str, object] = {}
 for uri in gcs_uris:
     if shutil.which("gcloud"):
         raw = subprocess.check_output(["gcloud", "storage", "cp", uri, "-"], text=True)
@@ -425,8 +426,6 @@ for uri in gcs_uris:
     if not isinstance(outputs, dict):
         raise ValueError(f"Expected JSON object in {uri}")
     for key, payload in outputs.items():
-        if key not in declared_vars:
-            continue
         if isinstance(payload, dict) and "value" in payload and "sensitive" in payload:
             if payload.get("sensitive") is True:
                 continue
@@ -434,7 +433,13 @@ for uri in gcs_uris:
         else:
             val = payload
         if val is not None:
-            merged[key] = val
+            all_source_outputs[key] = val
+            if key in declared_vars:
+                merged[key] = val
+
+data_subnet = all_source_outputs.get("data_subnet_id")
+if "subnet_id" in declared_vars and isinstance(data_subnet, str) and data_subnet.strip():
+    merged["subnet_id"] = data_subnet
 
 if env_name and "environment" in declared_vars and "environment" not in merged:
     merged["environment"] = env_name
@@ -487,7 +492,7 @@ def find_repo_root(stage_abs: Path) -> Path | None:
     for candidate in stage_abs.parents:
         if candidate == candidate.parent:
             break
-        if candidate.name in ("stages", "foundation", "data"):
+        if candidate.name in ("stages", "foundation", "data", "apps"):
             return candidate.parent
     return None
 
@@ -574,17 +579,24 @@ def read_stage_outputs(raw_src: str, env: str, state_bucket: str) -> dict[str, o
 
 
 merged: dict[str, object] = {}
+all_source_outputs: dict[str, object] = {}
 
 for raw_src in raw_sources:
     outputs = read_stage_outputs(raw_src, env_name, tfstate_bucket)
     for key, payload in outputs.items():
-        if key not in declared_vars or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
             continue
         if payload.get("sensitive") is True:
             continue
         val = payload.get("value")
         if val is not None:
-            merged[key] = val
+            all_source_outputs[key] = val
+            if key in declared_vars:
+                merged[key] = val
+
+data_subnet = all_source_outputs.get("data_subnet_id")
+if "subnet_id" in declared_vars and isinstance(data_subnet, str) and data_subnet.strip():
+    merged["subnet_id"] = data_subnet
 
 if env_name and "environment" in declared_vars and "environment" not in merged:
     merged["environment"] = env_name

@@ -249,7 +249,7 @@ variable "region" {
 variable "environment" {
   type        = string
   default     = "dev"
-  description = "Target environment name (for example dev, staging, prod)."
+  description = "Target environment name (for example dev, uat, staging, prod)."
 }
 
 variable "prefix" {

@@ -8,6 +8,19 @@ Never commit real project IDs, KMS keys, dataset names, or database secrets to t
 
 Record answers in `stages/enterprise/envs/<env>.tfvars`, `stages/sandbox/terraform.tfvars`, or gitignored `00_linked.auto.tfvars.json`.
 
+Valid enterprise `<env>` values are `dev`, `uat`, `staging`, and `prod`.
+
+## Deterministic Agent Output Routing
+
+AI coding agents must map every questionnaire section to exact Terraform files:
+
+| Questionnaire Section | Target File | Mode / Scope |
+| --- | --- | --- |
+| Section 1 (Greenfield / Brownfield) | `stages/enterprise/00_linked.auto.tfvars.json` | Upstream linked outputs (`chmod 0600`, gitignored) |
+| Section 1 (Sandbox) | `stages/sandbox/terraform.tfvars` | Single-project sandbox inputs (gitignored) |
+| Sections 2, 3, and 4 | `stages/enterprise/envs/<env>.tfvars` | Tracked `dev`, `uat`, `staging`, or `prod` vars |
+| Secrets (`DB_PASSWORD`) | Regional Secret Manager | Store secret first, pass `datastream_db_password_secret_version` only |
+
 ---
 
 ## Section 1: Upstream Landing Zone Mode
@@ -71,9 +84,17 @@ Set these variables in `stages/sandbox/terraform.tfvars` or gitignored `stages/s
 | --- | --- | --- |
 | `project_id` | Required | Existing single sandbox GCP project ID |
 | `region` | `asia-southeast1` | GCP region for ingestion and BigQuery resources |
-| `prefix` | `bqfnd` | Resource prefix (`3-16` lowercase chars or hyphens) |
+| `prefix` | `bqfnd` | Company acronym (`3-6` lowercase chars, max `8`) |
 | `create_bronze_dataset` | `false` | Set `true` only without upstream foundation datasets |
 | `create_ops_telemetry_dataset` | `true` | Auto-creates `ops_telemetry` dataset when ID is empty |
+
+### Company Acronym Rule (`prefix`)
+
+Derive `prefix` as a `3-6` lowercase character company acronym from core words of the organization name.
+
+- Strip legal suffixes (`Bhd`, `Berhad`, `Sdn`, `Pte`, `Ltd`, `Inc`, `Corp`, `Holdings`, `Group`) when `>= 3` core words remain.
+- Example: `'Example Global Retail Ltd'` becomes `egr`, and `'Sample Financial Group'` becomes `sfg`.
+- Always confirm the suggested `prefix` with the user before writing `.tfvars` files.
 
 ---
 

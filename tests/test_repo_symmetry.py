@@ -27,6 +27,7 @@ STAGE_BASE_FILES = frozenset({
 ENTERPRISE_EXTRA_ENTRIES = frozenset({"envs"})
 EXPECTED_ENV_EXAMPLES = frozenset({
     "dev.tfvars.example",
+    "uat.tfvars.example",
     "staging.tfvars.example",
     "prod.tfvars.example",
 })
@@ -147,7 +148,7 @@ class RepoSymmetryTest(unittest.TestCase):
                     self.assertEqual(env_entries, EXPECTED_ENV_EXAMPLES)
                     dev_cfg = (envs_dir / "dev.tfvars.example").read_text(encoding="utf-8")
                     self.assertIn("enable_schedule             = false", dev_cfg)
-                    for env_name in ("staging", "prod"):
+                    for env_name in ("uat", "staging", "prod"):
                         cfg = (envs_dir / f"{env_name}.tfvars.example").read_text(encoding="utf-8")
                         self.assertIn("enable_batch_job            = true", cfg)
                         self.assertIn("batch_vpc_egress", cfg)

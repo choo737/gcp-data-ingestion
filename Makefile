@@ -38,7 +38,7 @@ init:
 		*) echo "Invalid STAGE: $(STAGE)" >&2; exit 1 ;; \
 	esac; \
 	case "$(ENV)" in \
-		dev|staging|prod) ;; \
+		dev|uat|staging|prod) ;; \
 		*) echo "Invalid ENV: $(ENV)" >&2; exit 1 ;; \
 	esac; \
 	if [ -n "$(strip $(DOMAIN_NAME))" ] && ! printf '%s' "$(strip $(DOMAIN_NAME))" | grep -Eq '^[a-z][a-z0-9-]{0,19}[a-z0-9]$$'; then \
