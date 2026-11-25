@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+message CrmCustomerEvent {
+  string event_id = 1;
+  string customer_id = 2;
+  string event_type = 3;
+  string segment = 4;
+  string channel = 5;
+  string event_date = 6;
+  string event_timestamp = 7;
+  bool marketing_opt_in = 8;
+  bool _metadata_deleted = 9;
+}

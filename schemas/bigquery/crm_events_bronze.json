@@ -1,0 +1,80 @@
+[
+  {
+    "name": "event_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Unique CRM event identifier."
+  },
+  {
+    "name": "customer_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Customer identifier."
+  },
+  {
+    "name": "event_type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "CRM lifecycle event type."
+  },
+  {
+    "name": "segment",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Customer loyalty segment."
+  },
+  {
+    "name": "channel",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Engagement channel."
+  },
+  {
+    "name": "event_date",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "Event calendar date."
+  },
+  {
+    "name": "event_timestamp",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Source event UTC timestamp."
+  },
+  {
+    "name": "marketing_opt_in",
+    "type": "BOOL",
+    "mode": "NULLABLE",
+    "description": "Consent flag for marketing outreach."
+  },
+  {
+    "name": "_metadata_deleted",
+    "type": "BOOL",
+    "mode": "NULLABLE",
+    "description": "Logical delete marker."
+  },
+  {
+    "name": "subscription_name",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Pub/Sub subscription metadata."
+  },
+  {
+    "name": "message_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Pub/Sub message ID."
+  },
+  {
+    "name": "publish_time",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Pub/Sub publish timestamp."
+  },
+  {
+    "name": "attributes",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "JSON-encoded Pub/Sub message attributes."
+  }
+]

@@ -1,0 +1,7 @@
+# Default platform reviewers for ingestion modules, pipelines, schemas, and stages.
+# Replace @example-org teams with your private repository GitHub teams on Day 0.
+/modules/ingestion/ @example-org/data-platform-leads
+/schemas/ @example-org/data-platform-leads
+/workflows/ @example-org/data-platform-leads
+/jobs/ @example-org/data-engineering-leads
+/stages/ @example-org/data-platform-leads

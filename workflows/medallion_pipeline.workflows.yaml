@@ -1,0 +1,826 @@
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - empty_map: {}
+          - empty_list: []
+          - raw_input: '${default(input, empty_map)}'
+          - medallion_targets: '${json.decode(sys.get_env("MEDALLION_TARGETS_JSON"))}'
+          - dataform_vars: '${json.decode(sys.get_env("DATAFORM_COMPILATION_VARS_JSON"))}'
+          - compute_project: '${sys.get_env("COMPUTE_PROJECT_ID")}'
+          - bronze_project: '${default(map.get(medallion_targets, "BRONZE_PROJECT_ID"), "")}'
+          - bronze_dataset: '${default(map.get(medallion_targets, "BRONZE_DATASET_ID"), "")}'
+          - silver_project: '${default(map.get(medallion_targets, "SILVER_PROJECT_ID"), "")}'
+          - silver_dataset: '${default(map.get(medallion_targets, "SILVER_DATASET_ID"), "")}'
+          - gold_project: '${default(map.get(medallion_targets, "GOLD_PROJECT_ID"), "")}'
+          - gold_dataset: '${default(map.get(medallion_targets, "GOLD_DATASET_ID"), "")}'
+          - gold_retail_project: '${default(map.get(medallion_targets, "GOLD_RETAIL_PROJECT_ID"), "")}'
+          - gold_retail_dataset: '${default(map.get(medallion_targets, "GOLD_RETAIL_DATASET_ID"), "")}'
+          - ml_audit_project: '${default(map.get(medallion_targets, "ML_AUDIT_PROJECT_ID"), "")}'
+          - ml_audit_dataset: '${default(map.get(medallion_targets, "ML_AUDIT_DATASET_ID"), "")}'
+          - assertions_dataset: '${default(map.get(medallion_targets, "ASSERTIONS_DATASET_ID"), "")}'
+          - region: '${sys.get_env("REGION")}'
+          - dataform_repo_path: '${sys.get_env("DATAFORM_REPO_PATH")}'
+          - dataform_release_config: '${sys.get_env("DATAFORM_RELEASE_CONFIG")}'
+          - dataform_git_commitish: '${sys.get_env("DATAFORM_GIT_COMMITISH")}'
+          - batch_job_name: '${sys.get_env("BATCH_JOB_NAME")}'
+          - additional_batch_jobs: '${json.decode(default(sys.get_env("ADDITIONAL_BATCH_JOB_NAMES_JSON"), "[]"))}'
+          - batch_source_prefix: '${sys.get_env("BATCH_SOURCE_PREFIX")}'
+          - quarantine_prefix: '${default(sys.get_env("QUARANTINE_PREFIX"), "quarantine/")}'
+          - dataplex_scan_id: '${sys.get_env("DATAPLEX_SCAN_ID")}'
+          - dataplex_quality_scan_id: '${sys.get_env("DATAPLEX_QUALITY_SCAN_ID")}'
+          - ops_telemetry_dataset: '${sys.get_env("OPS_TELEMETRY_DATASET")}'
+          - alert_pubsub_topic: '${sys.get_env("ALERT_PUBSUB_TOPIC")}'
+          - include_stream_orders: '${default(map.get(dataform_vars, "INCLUDE_STREAM_ORDERS"), "false")}'
+          - include_batch_orders: '${default(map.get(dataform_vars, "INCLUDE_BATCH_ORDERS"), "false")}'
+          - pii_policy_tag: '${default(map.get(dataform_vars, "PII_POLICY_TAG"), "")}'
+          - pii_restricted_policy_tag: '${default(map.get(dataform_vars, "PII_RESTRICTED_POLICY_TAG"), "")}'
+          - pii_masked_policy_tag: '${default(map.get(dataform_vars, "PII_MASKED_POLICY_TAG"), "")}'
+          - allow_untagged_pii: '${default(map.get(dataform_vars, "ALLOW_UNTAGGED_PII"), "true")}'
+          - workspace_id: '${default(map.get(raw_input, "workspace_id"), "")}'
+          - target_object: '${default(map.get(raw_input, "target_object"), default(map.get(raw_input, ["data", "name"]), default(map.get(raw_input, ["data", "message", "attributes", "objectId"]), "")))}'
+          - run_batch_job: '${default(map.get(raw_input, "run_batch_job"), sys.get_env("DEFAULT_RUN_BATCH_JOB") == "true")}'
+          - run_dataplex_scan: '${default(map.get(raw_input, "run_dataplex_scan"), sys.get_env("DEFAULT_RUN_DATAPLEX_SCAN") == "true")}'
+          - included_tags: '${default(map.get(raw_input, "included_tags"), empty_list)}'
+          - execution_id: '${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}'
+          - max_polls: 120
+          - poll_interval_seconds: 10
+          - batch_poll_count: 0
+          - batch_job_idx: 0
+          - additional_batch_idx: 0
+          - dataform_poll_count: 0
+          - dataplex_poll_count: 0
+          - dataplex_scan_idx: 0
+          - bq_poll_count: 0
+          - bq_failure_poll_count: 0
+          - batch_jobs_to_run: '${empty_list}'
+          - batch_op_names: '${empty_list}'
+          - dataplex_scans: '${empty_list}'
+          - dataplex_job_names: '${empty_list}'
+          - compilation_name: ""
+          - invocation_name: ""
+          - batch_op_name: ""
+          - dataplex_job_name: ""
+          - failure_stage: "init"
+
+    - validate_identifiers:
+        switch:
+          - condition: '${not text.match_regex(compute_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid COMPUTE_PROJECT_ID environment configuration"
+          - condition: '${bronze_project != "" and not text.match_regex(bronze_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid BRONZE_PROJECT_ID environment configuration"
+          - condition: '${silver_project != "" and not text.match_regex(silver_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid SILVER_PROJECT_ID environment configuration"
+          - condition: '${gold_project != "" and not text.match_regex(gold_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid GOLD_PROJECT_ID environment configuration"
+          - condition: '${gold_retail_project != "" and not text.match_regex(gold_retail_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid GOLD_RETAIL_PROJECT_ID environment configuration"
+          - condition: '${ml_audit_project != "" and not text.match_regex(ml_audit_project, "^[a-z][a-z0-9-]{4,28}[a-z0-9]$")}'
+            raise: "Invalid ML_AUDIT_PROJECT_ID environment configuration"
+          - condition: '${bronze_dataset != "" and (len(bronze_dataset) > 128 or not text.match_regex(bronze_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid BRONZE_DATASET_ID environment configuration"
+          - condition: '${silver_dataset != "" and (len(silver_dataset) > 128 or not text.match_regex(silver_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid SILVER_DATASET_ID environment configuration"
+          - condition: '${gold_dataset != "" and (len(gold_dataset) > 128 or not text.match_regex(gold_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid GOLD_DATASET_ID environment configuration"
+          - condition: '${gold_retail_dataset != "" and (len(gold_retail_dataset) > 128 or not text.match_regex(gold_retail_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid GOLD_RETAIL_DATASET_ID environment configuration"
+          - condition: '${ml_audit_dataset != "" and (len(ml_audit_dataset) > 128 or not text.match_regex(ml_audit_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid ML_AUDIT_DATASET_ID environment configuration"
+          - condition: '${assertions_dataset != "" and (len(assertions_dataset) > 128 or not text.match_regex(assertions_dataset, "^[A-Za-z_][A-Za-z0-9_]*$"))}'
+            raise: "Invalid ASSERTIONS_DATASET_ID environment configuration"
+          - condition: '${len(region) > 64 or not text.match_regex(region, "^[a-z]+-[a-z0-9-]+$")}'
+            raise: "Invalid REGION environment configuration"
+          - condition: '${len(ops_telemetry_dataset) > 128 or not text.match_regex(ops_telemetry_dataset, "^[A-Za-z_][A-Za-z0-9_]*$")}'
+            raise: "Invalid OPS_TELEMETRY_DATASET environment configuration"
+          - condition: '${len(dataform_repo_path) > 512 or not text.match_regex(dataform_repo_path, "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/[a-z0-9-]+/repositories/[A-Za-z0-9_-]+$")}'
+            raise: "Invalid DATAFORM_REPO_PATH environment configuration"
+          - condition: '${quarantine_prefix != "" and (len(quarantine_prefix) > 256 or text.match_regex(quarantine_prefix, "(^|/)\\.\\.(/|$)"))}'
+            raise: "Invalid QUARANTINE_PREFIX environment configuration"
+          - condition: '${workspace_id != "" and (len(workspace_id) > 128 or not text.match_regex(workspace_id, "^[A-Za-z0-9_-]+$"))}'
+            raise: "Invalid workspace_id execution argument"
+          - condition: '${target_object != "" and (len(target_object) > 512 or text.match_regex(target_object, "(^|/)\\.\\.(/|$)"))}'
+            raise: "Invalid target_object execution argument"
+
+    - normalize_source_prefix:
+        assign:
+          - normalized_source_prefix: '${text.replace_all_regex(batch_source_prefix, "^/+", "")}'
+    - ensure_source_prefix_slash:
+        switch:
+          - condition: '${normalized_source_prefix != "" and not text.ends_with(normalized_source_prefix, "/")}'
+            assign:
+              - normalized_source_prefix: '${normalized_source_prefix + "/"}'
+    - ignore_quarantine_events:
+        switch:
+          - condition: '${target_object != "" and quarantine_prefix != "" and text.starts_with(target_object, quarantine_prefix)}'
+            return:
+              status: "IGNORED_QUARANTINE_OBJECT"
+              execution_id: '${execution_id}'
+              target_object: '${target_object}'
+          - condition: '${target_object != "" and text.ends_with(target_object, "/")}'
+            return:
+              status: "IGNORED_DIRECTORY_OBJECT"
+              execution_id: '${execution_id}'
+              target_object: '${target_object}'
+          - condition: '${target_object != "" and normalized_source_prefix != "" and not text.starts_with(target_object, normalized_source_prefix)}'
+            return:
+              status: "IGNORED_NON_INCOMING_OBJECT"
+              execution_id: '${execution_id}'
+              target_object: '${target_object}'
+
+    - run_pipeline:
+        try:
+          steps:
+            - add_primary_batch_job:
+                switch:
+                  - condition: '${batch_job_name != ""}'
+                    assign:
+                      - batch_jobs_to_run: '${list.concat(batch_jobs_to_run, batch_job_name)}'
+            - add_additional_batch_jobs:
+                switch:
+                  - condition: '${additional_batch_idx < len(additional_batch_jobs)}'
+                    steps:
+                      - maybe_append_additional_batch_job:
+                          switch:
+                            - condition: '${additional_batch_jobs[additional_batch_idx] != "" and not (additional_batch_jobs[additional_batch_idx] in batch_jobs_to_run)}'
+                              assign:
+                                - batch_jobs_to_run: '${list.concat(batch_jobs_to_run, additional_batch_jobs[additional_batch_idx])}'
+                      - advance_additional_batch_idx:
+                          assign:
+                            - additional_batch_idx: '${additional_batch_idx + 1}'
+                          next: add_additional_batch_jobs
+            - maybe_run_batch_job:
+                switch:
+                  - condition: '${run_batch_job == true and batch_job_idx < len(batch_jobs_to_run)}'
+                    steps:
+                      - set_batch_stage:
+                          assign:
+                            - failure_stage: "batch_elt_job"
+                            - current_batch_job_name: '${batch_jobs_to_run[batch_job_idx]}'
+                            - batch_poll_count: 0
+                      - build_batch_run_body:
+                          switch:
+                            - condition: '${target_object != ""}'
+                              assign:
+                                - batch_run_body:
+                                    overrides:
+                                      containerOverrides:
+                                        - env:
+                                            - name: "TARGET_OBJECT"
+                                              value: '${target_object}'
+                            - condition: '${true}'
+                              assign:
+                                - batch_run_body: '${empty_map}'
+                      - trigger_batch_job:
+                          call: http.post
+                          args:
+                            url: '${"https://run.googleapis.com/v2/" + current_batch_job_name + ":run"}'
+                            auth:
+                              type: OAuth2
+                            body: '${batch_run_body}'
+                          result: batch_op
+                        retry:
+                          predicate: ${retry_transient_http}
+                          max_retries: 4
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                      - save_batch_op:
+                          assign:
+                            - batch_op_name: '${batch_op.body.name}'
+                            - batch_op_names: '${list.concat(batch_op_names, batch_op_name)}'
+                      - poll_batch_job:
+                          call: http.get
+                          args:
+                            url: '${"https://run.googleapis.com/v2/" + batch_op_name}'
+                            auth:
+                              type: OAuth2
+                          result: batch_status
+                        retry:
+                          predicate: ${retry_transient_http}
+                          max_retries: 4
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                      - check_batch_done:
+                          switch:
+                            - condition: '${not default(map.get(batch_status.body, "done"), false)}'
+                              steps:
+                                - check_batch_timeout:
+                                    switch:
+                                      - condition: '${batch_poll_count >= max_polls}'
+                                        raise: '${"Timed out waiting for Cloud Run batch job " + batch_op_name}'
+                                - increment_batch_poll:
+                                    assign:
+                                      - batch_poll_count: '${batch_poll_count + 1}'
+                                - sleep_batch:
+                                    call: sys.sleep
+                                    args:
+                                      seconds: '${poll_interval_seconds}'
+                                    next: poll_batch_job
+                            - condition: '${"error" in batch_status.body}'
+                              raise:
+                                message: "Cloud Run batch job returned operation error"
+                                detail: '${batch_status.body.error}'
+                            - condition: '${default(map.get(batch_status.body, ["response", "failedCount"]), 0) > 0}'
+                              raise:
+                                message: "Cloud Run batch job completed with failed tasks"
+                                detail: '${batch_status.body.response}'
+                            - condition: '${true}'
+                              steps:
+                                - advance_batch_job:
+                                    assign:
+                                      - batch_job_idx: '${batch_job_idx + 1}'
+                                    next: maybe_run_batch_job
+
+            - compile_dataform:
+                assign:
+                  - failure_stage: "compile_dataform"
+                  - effective_commitish: "main"
+                  - effective_release_config: ""
+                  - compilation_vars:
+                      include_stream_orders: '${include_stream_orders}'
+                      include_batch_orders: '${include_batch_orders}'
+                      pii_policy_tag: '${pii_policy_tag}'
+                      pii_restricted_policy_tag: '${pii_restricted_policy_tag}'
+                      pii_masked_policy_tag: '${pii_masked_policy_tag}'
+                      allow_untagged_pii: '${allow_untagged_pii}'
+            - resolve_dataform_commitish:
+                switch:
+                  - condition: '${dataform_git_commitish != ""}'
+                    assign:
+                      - effective_commitish: '${dataform_git_commitish}'
+            - resolve_dataform_release_config:
+                switch:
+                  - condition: '${dataform_release_config != "" and text.match_regex(dataform_release_config, "^projects/")}'
+                    assign:
+                      - effective_release_config: '${dataform_release_config}'
+                  - condition: '${dataform_release_config != ""}'
+                    assign:
+                      - effective_release_config: '${dataform_repo_path + "/releaseConfigs/" + dataform_release_config}'
+            - set_bronze_project_var:
+                switch:
+                  - condition: '${bronze_project != ""}'
+                    assign:
+                      - compilation_vars["bronze_project"]: '${bronze_project}'
+            - set_bronze_dataset_var:
+                switch:
+                  - condition: '${bronze_dataset != ""}'
+                    assign:
+                      - compilation_vars["bronze_dataset"]: '${bronze_dataset}'
+            - set_silver_project_var:
+                switch:
+                  - condition: '${silver_project != ""}'
+                    assign:
+                      - compilation_vars["silver_project"]: '${silver_project}'
+            - set_silver_dataset_var:
+                switch:
+                  - condition: '${silver_dataset != ""}'
+                    assign:
+                      - compilation_vars["silver_dataset"]: '${silver_dataset}'
+            - set_gold_project_var:
+                switch:
+                  - condition: '${gold_project != ""}'
+                    assign:
+                      - compilation_vars["gold_project"]: '${gold_project}'
+            - set_gold_dataset_var:
+                switch:
+                  - condition: '${gold_dataset != ""}'
+                    assign:
+                      - compilation_vars["gold_dataset"]: '${gold_dataset}'
+            - set_gold_retail_project_var:
+                switch:
+                  - condition: '${gold_retail_project != ""}'
+                    assign:
+                      - compilation_vars["gold_retail_project"]: '${gold_retail_project}'
+            - set_gold_retail_dataset_var:
+                switch:
+                  - condition: '${gold_retail_dataset != ""}'
+                    assign:
+                      - compilation_vars["gold_retail_dataset"]: '${gold_retail_dataset}'
+            - set_ml_audit_project_var:
+                switch:
+                  - condition: '${ml_audit_project != ""}'
+                    assign:
+                      - compilation_vars["ml_audit_project"]: '${ml_audit_project}'
+            - set_ml_audit_dataset_var:
+                switch:
+                  - condition: '${ml_audit_dataset != ""}'
+                    assign:
+                      - compilation_vars["ml_audit_dataset"]: '${ml_audit_dataset}'
+            - fallback_pii_policy_tag:
+                switch:
+                  - condition: '${pii_policy_tag == "" and pii_masked_policy_tag != ""}'
+                    assign:
+                      - compilation_vars["pii_policy_tag"]: '${pii_masked_policy_tag}'
+            - build_code_compilation_config:
+                switch:
+                  - condition: '${silver_project != "" and assertions_dataset != ""}'
+                    assign:
+                      - code_compilation_config:
+                          defaultDatabase: '${silver_project}'
+                          assertionSchema: '${assertions_dataset}'
+                          vars: '${compilation_vars}'
+                  - condition: '${silver_project != ""}'
+                    assign:
+                      - code_compilation_config:
+                          defaultDatabase: '${silver_project}'
+                          vars: '${compilation_vars}'
+                  - condition: '${assertions_dataset != ""}'
+                    assign:
+                      - code_compilation_config:
+                          assertionSchema: '${assertions_dataset}'
+                          vars: '${compilation_vars}'
+                  - condition: '${true}'
+                    assign:
+                      - code_compilation_config:
+                          vars: '${compilation_vars}'
+            - set_default_schema:
+                switch:
+                  - condition: '${silver_dataset != ""}'
+                    assign:
+                      - code_compilation_config["defaultSchema"]: '${silver_dataset}'
+            - set_default_location:
+                switch:
+                  - condition: '${region != ""}'
+                    assign:
+                      - code_compilation_config["defaultLocation"]: '${region}'
+            - build_compilation_payload:
+                switch:
+                  - condition: '${workspace_id != ""}'
+                    assign:
+                      - compile_body:
+                          workspace: '${dataform_repo_path + "/workspaces/" + workspace_id}'
+                          codeCompilationConfig: '${code_compilation_config}'
+                  - condition: '${effective_release_config != ""}'
+                    steps:
+                      - get_release_config:
+                          call: http.get
+                          args:
+                            url: '${"https://dataform.googleapis.com/v1/" + effective_release_config}'
+                            auth:
+                              type: OAuth2
+                          result: rc
+                        retry:
+                          predicate: ${retry_transient_http}
+                          max_retries: 4
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                      - extract_release_config:
+                          assign:
+                            - rc_commitish: '${default(map.get(rc.body, "gitCommitish"), "")}'
+                            - merged_cfg: '${default(map.get(rc.body, "codeCompilationConfig"), empty_map)}'
+                            - merged_vars: '${default(map.get(merged_cfg, "vars"), empty_map)}'
+                      - merge_runtime_vars:
+                          for:
+                            value: var_key
+                            in: '${keys(compilation_vars)}'
+                            steps:
+                              - apply_runtime_var:
+                                  switch:
+                                    - condition: '${compilation_vars[var_key] != ""}'
+                                      assign:
+                                        - merged_vars[var_key]: '${compilation_vars[var_key]}'
+                      - merge_runtime_cfg_fields:
+                          for:
+                            value: cfg_key
+                            in: '${keys(code_compilation_config)}'
+                            steps:
+                              - apply_runtime_cfg_field:
+                                  switch:
+                                    - condition: '${cfg_key != "vars" and code_compilation_config[cfg_key] != ""}'
+                                      assign:
+                                        - merged_cfg[cfg_key]: '${code_compilation_config[cfg_key]}'
+                      - attach_merged_vars:
+                          assign:
+                            - merged_cfg["vars"]: '${merged_vars}'
+                      - select_release_compile_body:
+                          switch:
+                            - condition: '${rc_commitish != ""}'
+                              assign:
+                                - compile_body:
+                                    gitCommitish: '${rc_commitish}'
+                                    codeCompilationConfig: '${merged_cfg}'
+                            - condition: '${true}'
+                              assign:
+                                - compile_body:
+                                    releaseConfig: '${effective_release_config}'
+                  - condition: '${true}'
+                    assign:
+                      - compile_body:
+                          gitCommitish: '${effective_commitish}'
+                          codeCompilationConfig: '${code_compilation_config}'
+            - create_compilation:
+                call: http.post
+                args:
+                  url: '${"https://dataform.googleapis.com/v1/" + dataform_repo_path + "/compilationResults"}'
+                  auth:
+                    type: OAuth2
+                  body: '${compile_body}'
+                result: comp
+              retry:
+                predicate: ${retry_transient_http}
+                max_retries: 4
+                backoff:
+                  initial_delay: 2
+                  max_delay: 30
+                  multiplier: 2
+            - check_compilation_errors:
+                switch:
+                  - condition: '${len(default(map.get(comp.body, "compilationErrors"), empty_list)) > 0}'
+                    raise:
+                      message: "Dataform compilation returned SQLX errors"
+                      errors: '${comp.body.compilationErrors}'
+            - save_compilation_name:
+                assign:
+                  - compilation_name: '${comp.body.name}'
+
+            - invoke_dataform:
+                assign:
+                  - failure_stage: "invoke_dataform"
+            - build_invocation_config:
+                switch:
+                  - condition: '${len(included_tags) > 0}'
+                    assign:
+                      - invocation_config:
+                          transitiveDependenciesIncluded: true
+                          fullyRefreshIncrementalTablesEnabled: false
+                          includedTags: '${included_tags}'
+                  - condition: '${true}'
+                    assign:
+                      - invocation_config:
+                          transitiveDependenciesIncluded: true
+                          fullyRefreshIncrementalTablesEnabled: false
+            - start_invocation:
+                call: http.post
+                args:
+                  url: '${"https://dataform.googleapis.com/v1/" + dataform_repo_path + "/workflowInvocations"}'
+                  auth:
+                    type: OAuth2
+                  body:
+                    compilationResult: '${compilation_name}'
+                    invocationConfig: '${invocation_config}'
+                result: inv_resp
+              retry:
+                predicate: ${retry_transient_http}
+                max_retries: 4
+                backoff:
+                  initial_delay: 2
+                  max_delay: 30
+                  multiplier: 2
+            - save_invocation_name:
+                assign:
+                  - invocation_name: '${inv_resp.body.name}'
+            - poll_invocation:
+                call: http.get
+                args:
+                  url: '${"https://dataform.googleapis.com/v1/" + invocation_name}'
+                  auth:
+                    type: OAuth2
+                result: inv_status
+              retry:
+                predicate: ${retry_transient_http}
+                max_retries: 4
+                backoff:
+                  initial_delay: 2
+                  max_delay: 30
+                  multiplier: 2
+            - check_invocation_state:
+                switch:
+                  - condition: '${default(map.get(inv_status.body, "state"), "") == "SUCCEEDED"}'
+                    next: prepare_dataplex_scans
+                  - condition: '${default(map.get(inv_status.body, "state"), "") == "FAILED" or default(map.get(inv_status.body, "state"), "") == "CANCELLED"}'
+                    raise:
+                      message: '${"Dataform workflow invocation ended with state " + default(map.get(inv_status.body, "state"), "UNKNOWN")}'
+                      invocation: '${invocation_name}'
+                  - condition: '${dataform_poll_count >= max_polls}'
+                    raise: '${"Timed out waiting for Dataform workflow invocation " + invocation_name}'
+                  - condition: '${true}'
+                    steps:
+                      - increment_dataform_poll:
+                          assign:
+                            - dataform_poll_count: '${dataform_poll_count + 1}'
+                      - sleep_dataform:
+                          call: sys.sleep
+                          args:
+                            seconds: '${poll_interval_seconds}'
+                          next: poll_invocation
+
+            - prepare_dataplex_scans:
+                switch:
+                  - condition: '${gold_project != ""}'
+                    assign:
+                      - target_gold_project: '${gold_project}'
+                  - condition: '${true}'
+                    assign:
+                      - target_gold_project: '${compute_project}'
+            - add_profile_scan:
+                switch:
+                  - condition: '${dataplex_scan_id != "" and text.match_regex(dataplex_scan_id, "^projects/")}'
+                    assign:
+                      - dataplex_scans: '${list.concat(dataplex_scans, dataplex_scan_id)}'
+                  - condition: '${dataplex_scan_id != ""}'
+                    assign:
+                      - dataplex_scans: '${list.concat(dataplex_scans, "projects/" + target_gold_project + "/locations/" + region + "/dataScans/" + dataplex_scan_id)}'
+            - add_quality_scan:
+                switch:
+                  - condition: '${dataplex_quality_scan_id != "" and text.match_regex(dataplex_quality_scan_id, "^projects/")}'
+                    assign:
+                      - quality_resource: '${dataplex_quality_scan_id}'
+                  - condition: '${dataplex_quality_scan_id != ""}'
+                    assign:
+                      - quality_resource: '${"projects/" + target_gold_project + "/locations/" + region + "/dataScans/" + dataplex_quality_scan_id}'
+                  - condition: '${true}'
+                    assign:
+                      - quality_resource: ""
+            - append_quality_scan:
+                switch:
+                  - condition: '${quality_resource != "" and not (quality_resource in dataplex_scans)}'
+                    assign:
+                      - dataplex_scans: '${list.concat(dataplex_scans, quality_resource)}'
+
+            - maybe_run_dataplex:
+                switch:
+                  - condition: '${run_dataplex_scan == true and dataplex_scan_idx < len(dataplex_scans)}'
+                    steps:
+                      - set_dataplex_stage:
+                          assign:
+                            - failure_stage: "dataplex_scan"
+                            - current_scan_name: '${dataplex_scans[dataplex_scan_idx]}'
+                            - dataplex_poll_count: 0
+                      - trigger_dataplex:
+                          call: http.post
+                          args:
+                            url: '${"https://dataplex.googleapis.com/v1/" + current_scan_name + ":run"}'
+                            auth:
+                              type: OAuth2
+                          result: scan_resp
+                        retry:
+                          predicate: ${retry_transient_http}
+                          max_retries: 4
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                      - save_dataplex_job:
+                          assign:
+                            - dataplex_job_name: '${scan_resp.body.job.name}'
+                            - dataplex_job_names: '${list.concat(dataplex_job_names, dataplex_job_name)}'
+                      - poll_dataplex:
+                          call: http.get
+                          args:
+                            url: '${"https://dataplex.googleapis.com/v1/" + dataplex_job_name}'
+                            auth:
+                              type: OAuth2
+                          result: scan_status
+                        retry:
+                          predicate: ${retry_transient_http}
+                          max_retries: 4
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                      - check_dataplex_state:
+                          switch:
+                            - condition: '${default(map.get(scan_status.body, "state"), "") == "SUCCEEDED"}'
+                              steps:
+                                - advance_dataplex_scan:
+                                    assign:
+                                      - dataplex_scan_idx: '${dataplex_scan_idx + 1}'
+                                    next: maybe_run_dataplex
+                            - condition: '${default(map.get(scan_status.body, "state"), "") == "FAILED" or default(map.get(scan_status.body, "state"), "") == "CANCELLED" or default(map.get(scan_status.body, "state"), "") == "ABORTED"}'
+                              raise:
+                                message: '${"Knowledge Catalog scan failed with state " + default(map.get(scan_status.body, "state"), "UNKNOWN")}'
+                                job: '${dataplex_job_name}'
+                            - condition: '${dataplex_poll_count >= max_polls}'
+                              raise: '${"Timed out waiting for Knowledge Catalog scan job " + dataplex_job_name}'
+                            - condition: '${true}'
+                              steps:
+                                - increment_dataplex_poll:
+                                    assign:
+                                      - dataplex_poll_count: '${dataplex_poll_count + 1}'
+                                - sleep_dataplex:
+                                    call: sys.sleep
+                                    args:
+                                      seconds: '${poll_interval_seconds}'
+                                    next: poll_dataplex
+
+            - record_telemetry:
+                assign:
+                  - failure_stage: "record_telemetry"
+
+            - insert_success_row:
+                call: http.post
+                args:
+                  url: '${"https://bigquery.googleapis.com/bigquery/v2/projects/" + compute_project + "/queries"}'
+                  auth:
+                    type: OAuth2
+                  body:
+                    location: '${region}'
+                    useLegacySql: false
+                    parameterMode: "NAMED"
+                    query: '${"INSERT INTO `" + compute_project + "." + ops_telemetry_dataset + ".pipeline_runs` (execution_id, status, compilation_name, invocation_name, recorded_at) VALUES (@execution_id, @status, @compilation_name, @invocation_name, CURRENT_TIMESTAMP())"}'
+                    queryParameters:
+                      - name: "execution_id"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: '${execution_id}'
+                      - name: "status"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: "SUCCEEDED"
+                      - name: "compilation_name"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: '${compilation_name}'
+                      - name: "invocation_name"
+                        parameterType:
+                          type: "STRING"
+                        parameterValue:
+                          value: '${invocation_name}'
+                result: bq_telemetry_resp
+              retry:
+                predicate: ${retry_transient_http}
+                max_retries: 4
+                backoff:
+                  initial_delay: 2
+                  max_delay: 30
+                  multiplier: 2
+            - check_success_telemetry_complete:
+                switch:
+                  - condition: '${default(map.get(bq_telemetry_resp.body, "jobComplete"), true) == false}'
+                    steps:
+                      - check_success_telemetry_timeout:
+                          switch:
+                            - condition: '${bq_poll_count >= max_polls}'
+                              raise: "Timed out waiting for BigQuery success telemetry query job"
+                      - sleep_success_telemetry:
+                          call: sys.sleep
+                          args:
+                            seconds: '${poll_interval_seconds}'
+                      - poll_success_telemetry:
+                          call: http.get
+                          args:
+                            url: '${"https://bigquery.googleapis.com/bigquery/v2/projects/" + compute_project + "/queries/" + bq_telemetry_resp.body.jobReference.jobId}'
+                            auth:
+                              type: OAuth2
+                            query:
+                              location: '${region}'
+                          result: bq_telemetry_resp
+                        retry:
+                          predicate: ${retry_transient_http}
+                          max_retries: 4
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                      - inc_success_telemetry_poll:
+                          assign:
+                            - bq_poll_count: '${bq_poll_count + 1}'
+                          next: check_success_telemetry_complete
+
+            - finish:
+                return:
+                  status: "SUCCEEDED"
+                  execution_id: '${execution_id}'
+                  compilation_name: '${compilation_name}'
+                  invocation_name: '${invocation_name}'
+                  batch_op_name: '${batch_op_name}'
+                  batch_op_names: '${batch_op_names}'
+                  dataplex_job_name: '${dataplex_job_name}'
+                  dataplex_job_names: '${dataplex_job_names}'
+
+        except:
+          as: err
+          steps:
+            - record_failure_telemetry:
+                try:
+                  steps:
+                    - insert_failure_row:
+                        call: http.post
+                        args:
+                          url: '${"https://bigquery.googleapis.com/bigquery/v2/projects/" + compute_project + "/queries"}'
+                          auth:
+                            type: OAuth2
+                          body:
+                            location: '${region}'
+                            useLegacySql: false
+                            parameterMode: "NAMED"
+                            query: '${"INSERT INTO `" + compute_project + "." + ops_telemetry_dataset + ".pipeline_runs` (execution_id, status, compilation_name, invocation_name, recorded_at) VALUES (@execution_id, @status, @compilation_name, @invocation_name, CURRENT_TIMESTAMP())"}'
+                            queryParameters:
+                              - name: "execution_id"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: '${execution_id}'
+                              - name: "status"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: "FAILED"
+                              - name: "compilation_name"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: '${compilation_name}'
+                              - name: "invocation_name"
+                                parameterType:
+                                  type: "STRING"
+                                parameterValue:
+                                  value: '${invocation_name}'
+                        result: bq_failure_resp
+                      retry:
+                        predicate: ${retry_transient_http}
+                        max_retries: 4
+                        backoff:
+                          initial_delay: 2
+                          max_delay: 30
+                          multiplier: 2
+                    - check_failure_telemetry_complete:
+                        switch:
+                          - condition: '${default(map.get(bq_failure_resp.body, "jobComplete"), true) == false and bq_failure_poll_count < max_polls}'
+                            steps:
+                              - sleep_failure_telemetry:
+                                  call: sys.sleep
+                                  args:
+                                    seconds: '${poll_interval_seconds}'
+                              - poll_failure_telemetry:
+                                  call: http.get
+                                  args:
+                                    url: '${"https://bigquery.googleapis.com/bigquery/v2/projects/" + compute_project + "/queries/" + bq_failure_resp.body.jobReference.jobId}'
+                                    auth:
+                                      type: OAuth2
+                                    query:
+                                      location: '${region}'
+                                  result: bq_failure_resp
+                                retry:
+                                  predicate: ${retry_transient_http}
+                                  max_retries: 4
+                                  backoff:
+                                    initial_delay: 2
+                                    max_delay: 30
+                                    multiplier: 2
+                              - inc_failure_telemetry_poll:
+                                  assign:
+                                    - bq_failure_poll_count: '${bq_failure_poll_count + 1}'
+                                  next: check_failure_telemetry_complete
+                except:
+                  as: telemetry_err
+                  steps:
+                    - log_telemetry_err:
+                        call: sys.log
+                        args:
+                          data: '${json.encode_to_string(telemetry_err)}'
+                          severity: "WARNING"
+            - alert_and_fail:
+                assign:
+                  - alert_payload:
+                      execution_id: '${execution_id}'
+                      status: "FAILED"
+                      stage: '${failure_stage}'
+                      compilation_name: '${compilation_name}'
+                      invocation_name: '${invocation_name}'
+                      error: '${err}'
+            - publish_alert:
+                call: http.post
+                args:
+                  url: '${"https://pubsub.googleapis.com/v1/" + alert_pubsub_topic + ":publish"}'
+                  auth:
+                    type: OAuth2
+                  body:
+                    messages:
+                      - data: '${base64.encode(json.encode(alert_payload))}'
+              retry:
+                predicate: ${retry_transient_http}
+                max_retries: 4
+                backoff:
+                  initial_delay: 2
+                  max_delay: 30
+                  multiplier: 2
+            - raise_pipeline_error:
+                raise: '${err}'
+
+retry_transient_http:
+  params: [e]
+  steps:
+    - init_retry_fields:
+        assign:
+          - empty_tags: []
+          - err_tags: '${default(map.get(e, "tags"), empty_tags)}'
+          - err_code: '${default(map.get(e, "code"), 0)}'
+    - evaluate_retry:
+        switch:
+          - condition: '${err_code in [429, 500, 502, 503, 504]}'
+            return: true
+          - condition: '${"ConnectionError" in err_tags or "TimeoutError" in err_tags}'
+            return: true
+          - condition: '${true}'
+            return: false

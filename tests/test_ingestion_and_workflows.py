@@ -1,0 +1,2075 @@
+"""Hermetic tests for batch loader, workflows, Managed Airflow DAG, linker, and IAM."""
+
+from __future__ import annotations
+
+import ast
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import MagicMock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import suite_doc_contract  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _install_google_cloud_test_shims() -> type[Exception]:
+    """Provide minimal Google Cloud SDK types inside tests when wheels are absent."""
+    try:
+        from google.api_core.exceptions import GoogleAPICallError  # type: ignore
+        from google.cloud import bigquery, storage  # type: ignore  # noqa: F401
+        return GoogleAPICallError
+    except ImportError:
+        pass
+
+    class _FakeGoogleAPICallError(Exception):
+        pass
+
+    google_mod = types.ModuleType("google")
+    api_core_mod = types.ModuleType("google.api_core")
+    exceptions_mod = types.ModuleType("google.api_core.exceptions")
+    exceptions_mod.GoogleAPICallError = _FakeGoogleAPICallError
+
+    cloud_mod = types.ModuleType("google.cloud")
+    bigquery_mod = types.ModuleType("google.cloud.bigquery")
+    storage_mod = types.ModuleType("google.cloud.storage")
+
+    class _SourceFormat:
+        CSV = "CSV"
+        NEWLINE_DELIMITED_JSON = "NEWLINE_DELIMITED_JSON"
+        PARQUET = "PARQUET"
+
+    class _WriteDisposition:
+        WRITE_APPEND = "WRITE_APPEND"
+
+    class _TimePartitioningType:
+        DAY = "DAY"
+
+    class _TimePartitioning:
+        def __init__(self, type_: str = "DAY", field: str | None = None) -> None:
+            self.type_ = type_
+            self.field = field
+
+    class _SchemaUpdateOption:
+        ALLOW_FIELD_ADDITION = "ALLOW_FIELD_ADDITION"
+
+    class _SchemaField:
+        def __init__(self, name: str, field_type: str, mode: str = "NULLABLE") -> None:
+            self.name = name
+            self.field_type = field_type
+            self.mode = mode
+
+    class _EncryptionConfiguration:
+        def __init__(self, kms_key_name: str) -> None:
+            self.kms_key_name = kms_key_name
+
+    class _Table:
+        def __init__(self, table_ref: str, schema=None) -> None:
+            self.table_ref = table_ref
+            self.schema = schema
+            self.encryption_configuration = None
+            self.time_partitioning = None
+
+    class _LoadJobConfig:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _ScalarQueryParameter:
+        def __init__(self, name: str, param_type: str, value) -> None:
+            self.name = name
+            self.param_type = param_type
+            self.value = value
+
+    class _ArrayQueryParameter:
+        def __init__(self, name: str, array_type: str, values) -> None:
+            self.name = name
+            self.array_type = array_type
+            self.values = values
+
+    class _QueryJobConfig:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    bigquery_mod.SourceFormat = _SourceFormat
+    bigquery_mod.WriteDisposition = _WriteDisposition
+    bigquery_mod.TimePartitioningType = _TimePartitioningType
+    bigquery_mod.TimePartitioning = _TimePartitioning
+    bigquery_mod.SchemaUpdateOption = _SchemaUpdateOption
+    bigquery_mod.SchemaField = _SchemaField
+    bigquery_mod.EncryptionConfiguration = _EncryptionConfiguration
+    bigquery_mod.Table = _Table
+    bigquery_mod.LoadJobConfig = _LoadJobConfig
+    bigquery_mod.ScalarQueryParameter = _ScalarQueryParameter
+    bigquery_mod.ArrayQueryParameter = _ArrayQueryParameter
+    bigquery_mod.QueryJobConfig = _QueryJobConfig
+    bigquery_mod.Client = MagicMock
+
+    storage_mod.Client = MagicMock
+
+    sys.modules["google"] = google_mod
+    sys.modules["google.api_core"] = api_core_mod
+    sys.modules["google.api_core.exceptions"] = exceptions_mod
+    sys.modules["google.cloud"] = cloud_mod
+    sys.modules["google.cloud.bigquery"] = bigquery_mod
+    sys.modules["google.cloud.storage"] = storage_mod
+    return _FakeGoogleAPICallError
+
+
+GoogleAPICallError = _install_google_cloud_test_shims()
+LOADER_PATH = REPO_ROOT / "jobs" / "gcs_to_bronze" / "loader.py"
+LOADER_SPEC = importlib.util.spec_from_file_location("gcs_to_bronze_loader", LOADER_PATH)
+assert LOADER_SPEC and LOADER_SPEC.loader
+loader = importlib.util.module_from_spec(LOADER_SPEC)
+sys.modules["gcs_to_bronze_loader"] = loader
+LOADER_SPEC.loader.exec_module(loader)
+
+
+class IngestionAndWorkflowsTest(unittest.TestCase):
+    """Verify loader logic, Workflows YAML, Managed Airflow DAG, linker, and IAM."""
+
+    def test_loader_watermark_partitioned_merge_claim_and_complete(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="pos_orders_batch_cdc",
+            source_format="NEWLINE_DELIMITED_JSON",
+            kms_key_id="projects/net/locations/asia-southeast1/keyRings/kr/cryptoKeys/k",
+        )
+
+        bq_client = MagicMock()
+        select_query_job = MagicMock()
+        select_query_job.result.return_value = [
+            {"gcs_uri": "gs://bronze-proj-landing/incoming/already.json", "generation": 100},
+        ]
+        merge_claim_job = MagicMock()
+        merge_claim_job.num_dml_affected_rows = 1
+        merge_claim_job.result.return_value = []
+        complete_update_job = MagicMock()
+        complete_update_job.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, merge_claim_job, complete_update_job]
+
+        load_job = MagicMock()
+        load_job.job_id = "bq-load-123"
+        load_job.output_rows = 42
+        load_job.result.return_value = None
+        bq_client.load_table_from_uri.return_value = load_job
+
+        dir_blob = MagicMock()
+        dir_blob.name = "incoming/"
+        dir_blob.generation = 1
+
+        quarantine_blob = MagicMock()
+        quarantine_blob.name = "quarantine/old.json"
+        quarantine_blob.generation = 2
+
+        already_blob = MagicMock()
+        already_blob.name = "incoming/already.json"
+        already_blob.generation = 100
+
+        new_blob = MagicMock()
+        new_blob.name = "incoming/new_orders.json"
+        new_blob.generation = 200
+
+        storage_client = MagicMock()
+        storage_client.list_blobs.return_value = [
+            dir_blob,
+            quarantine_blob,
+            already_blob,
+            new_blob,
+        ]
+
+        result = loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
+
+        self.assertEqual(result.loaded_files, 1)
+        self.assertEqual(result.skipped_files, 1)
+        self.assertEqual(result.quarantined_files, 0)
+        self.assertEqual(result.loaded_rows, 42)
+
+        bq_client.create_table.assert_called_once()
+        created_table = bq_client.create_table.call_args.args[0]
+        self.assertIsNotNone(created_table.time_partitioning)
+        self.assertEqual(created_table.time_partitioning.field, "loaded_at")
+        self.assertEqual(created_table.time_partitioning.type_, "DAY")
+
+        bq_client.load_table_from_uri.assert_called_once()
+        load_args, load_kwargs = bq_client.load_table_from_uri.call_args
+        self.assertEqual(load_args[0], "gs://bronze-proj-landing/incoming/new_orders.json")
+        self.assertEqual(load_args[1], "bronze-proj.ent_bronze_raw.pos_orders_batch_cdc")
+        job_cfg = load_kwargs["job_config"]
+        cfg_attrs = getattr(job_cfg, "kwargs", None) or vars(job_cfg)
+        self.assertFalse(cfg_attrs.get("autodetect", getattr(job_cfg, "autodetect", True)))
+        schema_opts = cfg_attrs.get(
+            "schema_update_options", getattr(job_cfg, "schema_update_options", [])
+        )
+        self.assertEqual(schema_opts, ["ALLOW_FIELD_ADDITION"])
+
+        self.assertEqual(bq_client.query.call_count, 3)
+        select_sql = bq_client.query.call_args_list[0].args[0]
+        self.assertIn("TIMESTAMP_SUB", select_sql)
+        self.assertIn("@lookback_days", select_sql)
+
+        merge_sql = bq_client.query.call_args_list[1].args[0]
+        self.assertIn("MERGE `bronze-proj.ent_bronze_raw._ingestion_watermarks`", merge_sql)
+        self.assertIn("IN_PROGRESS", merge_sql)
+        self.assertIn("@stale_minutes", merge_sql)
+        self.assertNotIn("new_orders.json", merge_sql)
+
+        update_sql = bq_client.query.call_args_list[2].args[0]
+        self.assertIn("UPDATE `bronze-proj.ent_bronze_raw._ingestion_watermarks`", update_sql)
+        self.assertIn("status = 'LOADED'", update_sql)
+
+    def test_loader_concurrent_merge_claim_zero_rows_skips_load(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="pos_orders_batch_cdc",
+            target_object="incoming/2026/01/orders.json",
+        )
+
+        bq_client = MagicMock()
+        merge_lost_job = MagicMock()
+        merge_lost_job.num_dml_affected_rows = 0
+        merge_lost_job.result.return_value = []
+        bq_client.query.return_value = merge_lost_job
+
+        blob = MagicMock()
+        blob.name = "incoming/2026/01/orders.json"
+        blob.generation = 555
+
+        bucket = MagicMock()
+        bucket.get_blob.return_value = blob
+        storage_client = MagicMock()
+        storage_client.bucket.return_value = bucket
+
+        result = loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
+        self.assertEqual(result.loaded_files, 0)
+        self.assertEqual(result.skipped_files, 1)
+        storage_client.list_blobs.assert_not_called()
+        bucket.get_blob.assert_called_once_with("incoming/2026/01/orders.json")
+        bq_client.load_table_from_uri.assert_not_called()
+
+    def test_loader_target_object_ignores_quarantine_and_supports_cli_arg(self) -> None:
+        env_backup = os.environ.copy()
+        try:
+            os.environ.update({
+                "BRONZE_PROJECT": "bronze-proj",
+                "BRONZE_DATASET": "ent_bronze_raw",
+                "LANDING_BUCKET": "bronze-proj-landing",
+                "TARGET_TABLE": "pos_orders_batch_cdc",
+            })
+            args = loader._parse_args(["--target-object", "incoming/day1/part.json"])
+            self.assertEqual(args.target_object, "incoming/day1/part.json")
+            cfg = loader.LoaderConfig.from_env(target_object_override=args.target_object)
+            self.assertEqual(cfg.target_object, "incoming/day1/part.json")
+
+            quarantine_cfg = loader.LoaderConfig(
+                bronze_project="bronze-proj",
+                bronze_dataset="ent_bronze_raw",
+                execution_project="etl-proj",
+                landing_bucket="bronze-proj-landing",
+                source_prefix="incoming/",
+                target_table="pos_orders_batch_cdc",
+                target_object="quarantine/day1/part.json",
+            )
+            bq_client = MagicMock()
+            storage_client = MagicMock()
+            result = loader.run_batch(config=quarantine_cfg, bq_client=bq_client, storage_client=storage_client)
+            self.assertEqual(result.loaded_files, 0)
+            self.assertEqual(result.skipped_files, 0)
+            bq_client.load_table_from_uri.assert_not_called()
+        finally:
+            os.environ.clear()
+            os.environ.update(env_backup)
+
+    def test_loader_autodetects_first_blob_only_when_target_missing(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="new_orders_cdc",
+        )
+
+        not_found = GoogleAPICallError("not found")
+        setattr(not_found, "code", 404)
+
+        bq_client = MagicMock()
+        bq_client.get_table.side_effect = not_found
+        select_query_job = MagicMock()
+        select_query_job.result.return_value = []
+        claim_a = MagicMock()
+        claim_a.num_dml_affected_rows = 1
+        claim_a.result.return_value = []
+        complete_a = MagicMock()
+        complete_a.result.return_value = []
+        claim_b = MagicMock()
+        claim_b.num_dml_affected_rows = 1
+        claim_b.result.return_value = []
+        complete_b = MagicMock()
+        complete_b.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, claim_a, complete_a, claim_b, complete_b]
+
+        load_job = MagicMock()
+        load_job.job_id = "bq-load-new"
+        load_job.output_rows = 2
+        load_job.result.return_value = None
+        bq_client.load_table_from_uri.return_value = load_job
+
+        blob_a = MagicMock()
+        blob_a.name = "incoming/part_a.json"
+        blob_a.generation = 11
+        blob_b = MagicMock()
+        blob_b.name = "incoming/part_b.json"
+        blob_b.generation = 12
+
+        storage_client = MagicMock()
+        storage_client.list_blobs.return_value = [blob_a, blob_b]
+
+        result = loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
+        self.assertEqual(result.loaded_files, 2)
+        self.assertEqual(result.loaded_rows, 4)
+
+        calls = bq_client.load_table_from_uri.call_args_list
+        self.assertEqual(len(calls), 2)
+        cfg_0 = calls[0].kwargs["job_config"]
+        cfg_1 = calls[1].kwargs["job_config"]
+        auto_0 = cfg_0.kwargs["autodetect"] if hasattr(cfg_0, "kwargs") else cfg_0.autodetect
+        auto_1 = cfg_1.kwargs["autodetect"] if hasattr(cfg_1, "kwargs") else cfg_1.autodetect
+        self.assertTrue(auto_0)
+        self.assertFalse(auto_1)
+
+    def test_loader_quarantines_nested_relative_path_and_releases_claim(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="pos_orders_batch_cdc",
+            fail_on_quarantine=True,
+        )
+
+        bq_client = MagicMock()
+        select_query_job = MagicMock()
+        select_query_job.result.return_value = []
+        claim_job = MagicMock()
+        claim_job.num_dml_affected_rows = 1
+        claim_job.result.return_value = []
+        release_job = MagicMock()
+        release_job.result.return_value = []
+        bq_client.query.side_effect = [select_query_job, claim_job, release_job]
+        bad_err = GoogleAPICallError("schema mismatch")
+        setattr(bad_err, "code", 400)
+        bq_client.load_table_from_uri.side_effect = bad_err
+
+        bad_blob = MagicMock()
+        bad_blob.name = "incoming/2026/01/orders.json"
+        bad_blob.generation = 999
+
+        error_sidecar = MagicMock()
+        bucket = MagicMock()
+        bucket.name = "bronze-proj-landing"
+        bucket.blob.return_value = error_sidecar
+
+        storage_client = MagicMock()
+        storage_client.bucket.return_value = bucket
+        storage_client.list_blobs.return_value = [bad_blob]
+
+        with self.assertLogs("gcs_to_bronze", level="ERROR") as log_ctx:
+            with self.assertRaises(loader.QuarantineError):
+                loader.run_batch(config=cfg, bq_client=bq_client, storage_client=storage_client)
+        self.assertTrue(any("schema mismatch" in msg for msg in log_ctx.output))
+
+        bucket.copy_blob.assert_called_once_with(bad_blob, bucket, "quarantine/2026/01/orders.json")
+        bucket.blob.assert_called_once_with("quarantine/2026/01/orders.json.error.json")
+        error_sidecar.upload_from_string.assert_called_once()
+        bad_blob.delete.assert_called_once()
+        release_sql = bq_client.query.call_args_list[2].args[0]
+        self.assertIn("DELETE FROM `bronze-proj.ent_bronze_raw._ingestion_watermarks`", release_sql)
+
+    def test_loader_from_env_rejects_missing_and_invalid_format(self) -> None:
+        with self.assertRaises(ValueError):
+            loader.LoaderConfig.from_env()
+
+        env_backup = os.environ.copy()
+        try:
+            os.environ.update({
+                "BRONZE_PROJECT": "p",
+                "BRONZE_DATASET": "d",
+                "LANDING_BUCKET": "b",
+                "TARGET_TABLE": "t",
+                "SOURCE_FORMAT": "AVRO",
+            })
+            with self.assertRaises(ValueError):
+                loader.LoaderConfig.from_env()
+        finally:
+            os.environ.clear()
+            os.environ.update(env_backup)
+
+    def test_workflows_yaml_ga_v1_bounded_polls_and_env_parity(self) -> None:
+        wf_path = REPO_ROOT / "workflows" / "medallion_pipeline.workflows.yaml"
+        wf_text = wf_path.read_text(encoding="utf-8")
+
+        try:
+            import yaml  # type: ignore
+
+            parsed = yaml.safe_load(wf_text)
+            self.assertIn("main", parsed)
+            self.assertEqual(parsed["main"]["params"], ["input"])
+        except ImportError:
+            self.assertIn("main:", wf_text)
+            self.assertIn("params: [input]", wf_text)
+
+        self.assertNotIn("v1beta1", wf_text)
+        required_fragments = (
+            "https://run.googleapis.com/v2/",
+            "https://dataform.googleapis.com/v1/",
+            "/compilationResults",
+            "compilationErrors",
+            "/workflowInvocations",
+            "codeCompilationConfig:",
+            "defaultDatabase:",
+            "defaultSchema",
+            "defaultLocation",
+            "assertionSchema:",
+            "effective_release_config",
+            "BRONZE_PROJECT_ID",
+            "BRONZE_DATASET_ID",
+            "SILVER_PROJECT_ID",
+            "SILVER_DATASET_ID",
+            "GOLD_PROJECT_ID",
+            "GOLD_DATASET_ID",
+            "GOLD_RETAIL_PROJECT_ID",
+            "GOLD_RETAIL_DATASET_ID",
+            "ML_AUDIT_PROJECT_ID",
+            "ML_AUDIT_DATASET_ID",
+            "ASSERTIONS_DATASET_ID",
+            "QUARANTINE_PREFIX",
+            "ADDITIONAL_BATCH_JOB_NAMES_JSON",
+            "include_stream_orders:",
+            "include_batch_orders:",
+            "pii_policy_tag:",
+            "pii_restricted_policy_tag:",
+            "pii_masked_policy_tag:",
+            "allow_untagged_pii:",
+            "https://dataplex.googleapis.com/v1/",
+            "DATAPLEX_SCAN_ID",
+            "DATAPLEX_QUALITY_SCAN_ID",
+            "max_polls: 120",
+            "poll_interval_seconds: 10",
+            "IGNORED_QUARANTINE_OBJECT",
+            'name: "TARGET_OBJECT"',
+            "https://bigquery.googleapis.com/bigquery/v2/projects/",
+            "location: '${region}'",
+            "jobComplete",
+            "useLegacySql: false",
+            'parameterMode: "NAMED"',
+            "queryParameters:",
+            "base64.encode(json.encode(alert_payload))",
+            "https://pubsub.googleapis.com/v1/",
+            "raise:",
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, wf_text)
+
+        rel_idx = wf_text.index("condition: '${effective_release_config != \"\"}'")
+        git_idx = wf_text.index("gitCommitish: '${effective_commitish}'")
+        self.assertLess(rel_idx, git_idx, "releaseConfig branch must take precedence over gitCommitish fallback")
+
+        for expr in re.findall(r"'\$\{(.+)\}'", wf_text):
+            stripped_strings = re.sub(r'"[^"]*"', '""', expr)
+            self.assertNotIn("{", stripped_strings, f"Inline brace literal inside expression: {expr}")
+            self.assertNotIn("?", stripped_strings, f"Unsupported ternary operator inside Workflows expression: {expr}")
+
+        for match in re.finditer(r"\{(\d+)(?:,(\d+))?\}", wf_text):
+            upper = int(match.group(2) or match.group(1))
+            self.assertLessEqual(upper, 100, f"RE2 quantifier > 100 in workflow YAML: {match.group(0)}")
+
+        wf_main = (REPO_ROOT / "modules/ingestion/pipeline-workflows/main.tf").read_text(encoding="utf-8")
+        env_calls = set(re.findall(r'sys\.get_env\("([A-Z0-9_]+)"\)', wf_text))
+        user_env_calls = [e for e in env_calls if not e.startswith("GOOGLE_CLOUD_WORKFLOW_")]
+        self.assertLessEqual(
+            len(user_env_calls),
+            20,
+            f"Workflows enforces <= 20 user_env_vars, found {len(user_env_calls)}: {sorted(user_env_calls)}",
+        )
+        for env_name in sorted(user_env_calls):
+            self.assertIn(f"{env_name}", wf_main, f"Workflow env var {env_name} missing from pipeline-workflows user_env_vars")
+
+    def test_composer_reference_dag_valid_python_and_operators(self) -> None:
+        dag_path = REPO_ROOT / "composer_reference" / "medallion_composer3_dag.py"
+        dag_text = dag_path.read_text(encoding="utf-8")
+        tree = ast.parse(dag_text, filename=str(dag_path))
+        self.assertIsInstance(tree, ast.Module)
+        for symbol in (
+            "DataformCreateCompilationResultOperator",
+            "DataformCreateWorkflowInvocationOperator",
+            "DataplexCreateOrUpdateDataQualityScanOperator",
+            "DataplexRunDataProfileScanOperator",
+        ):
+            self.assertIn(symbol, dag_text)
+
+    def test_link_stages_script_local_gcs_and_env_modes(self) -> None:
+        script_path = REPO_ROOT / "scripts" / "link-stages.sh"
+        self.assertTrue(script_path.is_file())
+        self.assertTrue(script_path.stat().st_mode & stat.S_IXUSR)
+
+        syntax = subprocess.run(["bash", "-n", str(script_path)], capture_output=True, text=True, check=False)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            gcs_store = tmp_path / "gcs_store"
+            src_a = tmp_path / "stage_a"
+            src_b = tmp_path / "stage_b"
+            dst = tmp_path / "stage_dst"
+            for directory in (bin_dir, gcs_store, src_a, src_b, dst):
+                directory.mkdir()
+            (src_a / "uat").mkdir()
+            (src_b / "uat").mkdir()
+
+            (dst / "variables.tf").write_text(
+                'variable "core_storage_project_id" {\n  type = string\n}\n'
+                'variable "kms_key_id" {\n  type = string\n}\n'
+                'variable "environment" {\n  type = string\n}\n'
+                'variable "secret_val" {\n  type = string\n}\n'
+                'variable "stale_var" {\n  type = string\n}\n',
+                encoding="utf-8",
+            )
+            linked_path = dst / "00_linked.auto.tfvars.json"
+            linked_path.write_text('{"stale_var": "old"}\n', encoding="utf-8")
+
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "arg = next(a for a in sys.argv[1:] if a.startswith('-chdir='))\n"
+                "src = arg.split('=', 1)[1]\n"
+                "if 'stage_a' in src:\n"
+                "    val = 'proj-core-uat' if src.endswith('/uat') else 'proj-core'\n"
+                "    print(json.dumps({'core_storage_project_id': {'value': val}, 'secret_val': {'value': 's', 'sensitive': True}, 'unused': {'value': 'x'}}))\n"
+                "else:\n"
+                "    print(json.dumps({'kms_key_id': {'value': 'projects/p/locations/r/keyRings/k/cryptoKeys/c'}}))\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+
+            gcloud_shim = bin_dir / "gcloud"
+            gcloud_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import shutil, sys\n"
+                f"store = Path({str(gcs_store)!r})\n"
+                "args = sys.argv[1:]\n"
+                "assert args[:2] == ['storage', 'cp']\n"
+                "src, dst = args[2], args[3]\n"
+                "if dst.startswith('gs://'):\n"
+                "    target = store / dst.replace('gs://', '').replace('/', '__')\n"
+                "    shutil.copyfile(src, target)\n"
+                "elif src.startswith('gs://') and dst == '-':\n"
+                "    source = store / src.replace('gs://', '').replace('/', '__')\n"
+                "    sys.stdout.write(source.read_text(encoding='utf-8'))\n",
+                encoding="utf-8",
+            )
+            gcloud_shim.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            local_res = subprocess.run(
+                [str(script_path), str(src_a), str(src_b), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(local_res.returncode, 0, local_res.stderr)
+            expected = {
+                "core_storage_project_id": "proj-core",
+                "kms_key_id": "projects/p/locations/r/keyRings/k/cryptoKeys/c",
+            }
+            self.assertEqual(json.loads(linked_path.read_text(encoding="utf-8")), expected)
+            self.assertEqual(stat.S_IMODE(linked_path.stat().st_mode), 0o600)
+
+            linked_path.unlink()
+            gcs_uri = "gs://example-state/outputs.json"
+            export_res = subprocess.run(
+                [str(script_path), "--export-gcs", gcs_uri, str(src_a), str(src_b)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(export_res.returncode, 0, export_res.stderr)
+
+            from_gcs_res = subprocess.run(
+                [str(script_path), "--from-gcs", gcs_uri, str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(from_gcs_res.returncode, 0, from_gcs_res.stderr)
+            self.assertEqual(json.loads(linked_path.read_text(encoding="utf-8")), expected)
+
+            linked_path.unlink()
+            env_export_res = subprocess.run(
+                [str(script_path), "--env", "uat", "--export-gcs", gcs_uri, str(src_a), str(src_b)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(env_export_res.returncode, 0, env_export_res.stderr)
+            self.assertTrue((gcs_store / "example-state__uat__outputs.json").is_file())
+
+            env_from_gcs_res = subprocess.run(
+                [str(script_path), "--env", "uat", "--from-gcs", gcs_uri, str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(env_from_gcs_res.returncode, 0, env_from_gcs_res.stderr)
+            self.assertEqual(
+                json.loads(linked_path.read_text(encoding="utf-8")),
+                {
+                    "core_storage_project_id": "proj-core-uat",
+                    "environment": "uat",
+                    "kms_key_id": "projects/p/locations/r/keyRings/k/cryptoKeys/c",
+                },
+            )
+
+            for raw_uri, expected_store_name in (
+                ("gs://example-state", "example-state__dev__foundation-outputs.json"),
+                ("gs://example-state/foundation-outputs.json", "example-state__dev__foundation-outputs.json"),
+                ("gs://example-state/dev/foundation-outputs.json", "example-state__dev__foundation-outputs.json"),
+                ("gs://example-state/foundation-dev.json", "example-state__foundation-dev.json"),
+                ("gs://example-state/shared/01-org-governance-outputs.json", "example-state__shared__01-org-governance-outputs.json"),
+            ):
+                with self.subTest(uri=raw_uri):
+                    exp_res = subprocess.run(
+                        [str(script_path), "--env", "dev", "--export-gcs", raw_uri, str(src_a), str(src_b)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(exp_res.returncode, 0, exp_res.stderr)
+                    self.assertTrue((gcs_store / expected_store_name).is_file(), f"Missing {expected_store_name}")
+                    from_res = subprocess.run(
+                        [str(script_path), "--env", "dev", "--from-gcs", raw_uri, str(dst)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(from_res.returncode, 0, from_res.stderr)
+                    self.assertEqual(
+                        json.loads(linked_path.read_text(encoding="utf-8")),
+                        {
+                            "core_storage_project_id": "proj-core",
+                            "environment": "dev",
+                            "kms_key_id": "projects/p/locations/r/keyRings/k/cryptoKeys/c",
+                        },
+                    )
+
+            # Verify --tfstate-bucket rejects empty/flag-swallowing inputs with exit code 2.
+            for bad_bucket_args in (
+                ["--env", "uat", "--tfstate-bucket", "", str(src_a), str(dst)],
+                ["--env", "uat", "--tfstate-bucket", "--env", str(src_a), str(dst)],
+                ["--env", "uat", "--tfstate-bucket=", str(src_a), str(dst)],
+                ["--env", "uat", "--tfstate-bucket", "BAD_BUCKET", str(src_a), str(dst)],
+            ):
+                with self.subTest(bad_bucket_args=bad_bucket_args):
+                    bad_res = subprocess.run(
+                        [str(script_path), *bad_bucket_args],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(bad_res.returncode, 2, bad_res.stderr)
+
+            # Verify fail-closed cross-env state mismatch guard in both local-link and --export-gcs modes.
+            mismatch_src = tmp_path / "mismatch_stage"
+            mismatch_src.mkdir()
+            mismatch_tf = bin_dir / "terraform"
+            mismatch_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps({'environment': {'value': 'dev', 'sensitive': False}, 'core_storage_project_id': {'value': 'proj-dev'}}))\n",
+                encoding="utf-8",
+            )
+            mismatch_tf.chmod(0o755)
+            for mismatch_args in (
+                ["--env", "uat", str(mismatch_src), str(dst)],
+                ["--env", "uat", "--export-gcs", "gs://example-state/out.json", str(mismatch_src)],
+            ):
+                with self.subTest(mismatch_args=mismatch_args):
+                    mm_res = subprocess.run(
+                        [str(script_path), *mismatch_args],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(mm_res.returncode, 1, mm_res.stderr)
+                    self.assertIn("ERROR:", mm_res.stderr)
+                    self.assertIn("environment='dev'", mm_res.stderr)
+                    self.assertIn("expected 'uat'", mm_res.stderr)
+
+            # Verify --tfstate-bucket + --env runs init -reconfigure with ingestion/<stage>/<env> on multi-env stage.
+            multi_src = tmp_path / "stages" / "enterprise"
+            (multi_src / "envs").mkdir(parents=True)
+            call_log = tmp_path / "link_tf_calls.log"
+            init_tf = bin_dir / "terraform"
+            init_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(args) + '\\n')\n"
+                "if 'output' in args:\n"
+                "    print(json.dumps({'environment': {'value': 'uat', 'sensitive': False}, 'core_storage_project_id': {'value': 'proj-uat'}}))\n",
+                encoding="utf-8",
+            )
+            init_tf.chmod(0o755)
+            init_env = env.copy()
+            init_env["TF_CALL_LOG"] = str(call_log)
+            init_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "uat",
+                    "--tfstate-bucket",
+                    "my-tfstate-bucket",
+                    "stages/enterprise",
+                    str(dst),
+                ],
+                cwd=tmp_path,
+                env=init_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_res.returncode, 0, init_res.stderr)
+            tf_calls = call_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(tf_calls), 2)
+            self.assertIn("init -reconfigure -input=false", tf_calls[0])
+            self.assertIn("-backend-config=bucket=my-tfstate-bucket", tf_calls[0])
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/uat", tf_calls[0])
+            self.assertIn("output -json", tf_calls[1])
+
+    def test_least_privilege_iam_policy_tags_and_security_invariants(self) -> None:
+        cdc_main = (REPO_ROOT / "modules/ingestion/datastream-cdc/main.tf").read_text(encoding="utf-8")
+        self.assertIn("secret_manager_stored_password = var.db_password_secret_version", cdc_main)
+        self.assertNotRegex(cdc_main, r"(?m)^\s*password\s*=")
+        self.assertIn("psc_interface_config", cdc_main)
+        self.assertIn("project = local.effective_compute_project_id", cdc_main)
+        self.assertNotIn("project = var.bronze_project_id\n  role    = \"roles/bigquery.jobUser\"", cdc_main)
+
+        pubsub_main = (REPO_ROOT / "modules/ingestion/pubsub-bigquery/main.tf").read_text(encoding="utf-8")
+        self.assertIn("google_bigquery_table_iam_member", pubsub_main)
+        self.assertNotIn("google_project_iam_member", pubsub_main)
+        self.assertIn("dead_letter_policy", pubsub_main)
+        self.assertIn("_quarantine", pubsub_main)
+        self.assertIn("customer_ic_number", pubsub_main)
+        self.assertIn("customer_email", pubsub_main)
+        self.assertIn("order_status", pubsub_main)
+        self.assertIn("tax_amount", pubsub_main)
+        self.assertNotIn("string status =", pubsub_main)
+        self.assertIn("policyTags", pubsub_main)
+
+        batch_main = (REPO_ROOT / "modules/ingestion/batch-elt-job/main.tf").read_text(encoding="utf-8")
+        self.assertIn("google_storage_bucket_iam_member", batch_main)
+        self.assertIn("google_bigquery_dataset_iam_member", batch_main)
+        self.assertIn("google_bigquery_table", batch_main)
+        self.assertIn("policyTags", batch_main)
+        self.assertIn("tax_amount", batch_main)
+        self.assertIn("_ingested_at", batch_main)
+        self.assertIn("_cdc_sequence_num", batch_main)
+        self.assertIn("_op_type", batch_main)
+        self.assertIn("field = local.effective_partition_field != \"\" ? local.effective_partition_field : null", batch_main)
+        self.assertIn("parallelism = 1", batch_main)
+        self.assertIn("vpc_access", batch_main)
+        self.assertIn("network_interfaces", batch_main)
+        self.assertNotIn("roles/storage.objectAdmin", batch_main)
+        project_iam_blocks = re.findall(
+            r'resource\s+"google_project_iam_member"\s+"[^"]+"\s*\{([^}]*)\}',
+            batch_main,
+        )
+        self.assertEqual(len(project_iam_blocks), 1)
+        self.assertIn('roles/bigquery.jobUser', project_iam_blocks[0])
+        self.assertNotIn('roles/bigquery.dataEditor', project_iam_blocks[0])
+        self.assertNotIn('roles/storage.', project_iam_blocks[0])
+
+        batch_vars = (REPO_ROOT / "modules/ingestion/batch-elt-job/variables.tf").read_text(encoding="utf-8")
+        self.assertIn('default     = ["order_status", "store_id"]', batch_vars)
+
+        sandbox_main = (REPO_ROOT / "stages/sandbox/main.tf").read_text(encoding="utf-8")
+        self.assertIn('matches_prefix = ["incoming/"]', sandbox_main)
+
+        sandbox_vars = (REPO_ROOT / "stages/sandbox/variables.tf").read_text(encoding="utf-8")
+        for var_name in (
+            "project_id",
+            "region",
+            "prefix",
+            "dataset_ids",
+            "bronze_dataset_id",
+            "ops_telemetry_dataset_id",
+            "dataform_repository_name",
+            "dataform_release_config_name",
+            "dataform_service_account_email",
+            "dataplex_scan_names",
+            "pii_restricted_policy_tag_id",
+            "pii_masked_policy_tag_id",
+        ):
+            self.assertIn(f'variable "{var_name}"', sandbox_vars)
+
+        enterprise_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
+        for var_name in (
+            "core_storage_project_id",
+            "core_project_id",
+            "etl_compute_project_id",
+            "compute_project_id",
+            "primary_gold_project_id",
+            "analytics_project_id",
+            "bi_project_id",
+            "governance_project_id",
+            "bronze_dataset_id",
+            "silver_dataset_id",
+            "gold_dataset_id",
+            "quarantine_dataset_id",
+            "landing_bucket_name",
+            "ops_telemetry_dataset_id",
+            "dataform_repository_name",
+            "dataform_release_config_name",
+            "dataform_release_config_id",
+            "dataform_service_account_email",
+            "dataform_sa_email",
+            "batch_loader_sa_email",
+            "pubsub_writer_sa_email",
+            "dataplex_scan_names",
+            "dataplex_profile_scan_id",
+            "dataplex_quality_scan_id",
+            "kms_key_id",
+            "kms_key_name",
+            "pii_restricted_policy_tag_id",
+            "pii_masked_policy_tag_id",
+            "artifact_registry_repository_uri",
+            "vpc_id",
+            "network_id",
+            "subnet_id",
+            "batch_vpc_egress",
+            "datastream_network_attachment_id",
+            "notification_channel_ids",
+            "region",
+            "environment",
+            "prefix",
+            "delete_contents_on_destroy",
+        ):
+            self.assertIn(f'variable "{var_name}"', enterprise_vars)
+
+        wf_main = (REPO_ROOT / "modules/ingestion/pipeline-workflows/main.tf").read_text(encoding="utf-8")
+        self.assertIn("google_bigquery_dataset_iam_member", wf_main)
+        self.assertIn("var.ops_telemetry_dataset_id", wf_main)
+        self.assertIn('resource "google_service_account" "trigger_invoker"', wf_main)
+        self.assertIn('resource "google_dataform_repository_iam_member" "dataform_editor"', wf_main)
+        self.assertNotIn("roles/dataform.editor", wf_main.split("google_dataform_repository_iam_member")[0])
+        self.assertRegex(wf_main, r'service\s*=\s*"eventarc\.googleapis\.com"')
+        self.assertRegex(wf_main, r'role\s*=\s*"roles/storage\.bucketViewer"')
+        self.assertRegex(
+            wf_main,
+            r'resource\s+"google_project_iam_member"\s+"gcs_eventarc_pubsub_publisher"\s*\{[^}]*project\s*=\s*var\.compute_project_id',
+        )
+        self.assertIn("google_service_account.trigger_invoker[0].email", wf_main)
+        self.assertNotIn("google_service_account.workflow.email", wf_main)
+
+        pyproject = (REPO_ROOT / "jobs/gcs_to_bronze/pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("google-cloud-bigquery==3.47.0", pyproject)
+        self.assertIn("google-cloud-storage==3.17.1", pyproject)
+        self.assertNotIn("pyarrow", pyproject)
+
+        lock_path = REPO_ROOT / "jobs/gcs_to_bronze/requirements.lock"
+        self.assertTrue(lock_path.is_file())
+        self.assertIn("--hash=sha256:", lock_path.read_text(encoding="utf-8"))
+
+        dockerfile = (REPO_ROOT / "jobs/gcs_to_bronze/Dockerfile").read_text(encoding="utf-8")
+        self.assertRegex(dockerfile, r"FROM python:3\.13-slim@sha256:[0-9a-f]{64}")
+        self.assertIn("--require-hashes --no-deps -r requirements.lock", dockerfile)
+        self.assertIn("USER 65532:65532", dockerfile)
+
+    def test_agent_docs_skills_makefile_and_ci(self) -> None:
+        required_skills = (
+            "setup-data-ingestion",
+            "add-batch-feed",
+            "add-cdc-source",
+            "add-streaming-topic",
+            "split-domain-ingestion",
+        )
+        fm_re = re.compile(r"\A---\nname:\s*([a-z0-9-]+)\ndescription:\s*(.+)\n---\n", re.MULTILINE)
+        for skill in required_skills:
+            skill_path = REPO_ROOT / ".agents/skills" / skill / "SKILL.md"
+            self.assertTrue(skill_path.is_file(), f"Missing skill {skill}")
+            match = fm_re.match(skill_path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(match)
+            self.assertEqual(match.group(1), skill)
+
+        for doc_name in ("AGENTS.md", "CLAUDE.md"):
+            content = (REPO_ROOT / doc_name).read_text(encoding="utf-8")
+            for ref in ("modules/ingestion/", "stages/", "00_linked.auto.tfvars.json", "setup-data-ingestion", "--private"):
+                self.assertIn(ref, content, f"{doc_name} missing {ref}")
+        self.assertFalse((REPO_ROOT / "GEMINI.md").exists(), "GEMINI.md must not exist")
+
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("ENV ?= dev", makefile)
+        self.assertIn("ingestion/$(NORMALIZED_STAGE)/$(ENV)", makefile)
+        self.assertIn("EFFECTIVE_STATE_BUCKET", makefile)
+        self.assertIn("plan: init", makefile)
+        self.assertIn("stages/sandbox", makefile)
+        self.assertIn("stages/enterprise", makefile)
+        self.assertNotIn('.terraform.lock.hcl', makefile)
+
+        for wf_file in ("ci.yml", "build-batch-loader.yml", "terraform-deploy.yml"):
+            wf_path = REPO_ROOT / ".github/workflows" / wf_file
+            self.assertTrue(wf_path.is_file(), f"Missing workflow {wf_file}")
+            wf_content = wf_path.read_text(encoding="utf-8")
+            self.assertIn("contents: read", wf_content)
+            self.assertRegex(wf_content, r"actions/checkout@[0-9a-f]{40}")
+            in_run_block = False
+            run_indent = 0
+            for line_no, raw_line in enumerate(wf_content.splitlines(), start=1):
+                stripped = raw_line.lstrip()
+                indent = len(raw_line) - len(stripped)
+                if in_run_block:
+                    if stripped and indent <= run_indent:
+                        in_run_block = False
+                    else:
+                        self.assertNotIn(
+                            "${{",
+                            raw_line,
+                            f"{wf_file}:{line_no}: expression interpolation inside run: block",
+                        )
+                        continue
+                if re.match(r"^(?:-\s*)?run\s*:", stripped):
+                    self.assertNotIn(
+                        "${{",
+                        stripped,
+                        f"{wf_file}:{line_no}: expression interpolation inside run: line",
+                    )
+                    if stripped.rstrip().endswith(("|", ">", "|-", ">-")):
+                        in_run_block = True
+                        run_indent = indent
+
+        ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("1.8.5", ci)
+        self.assertRegex(ci, r"hashicorp/setup-terraform@[0-9a-f]{40}")
+        self.assertRegex(ci, r"actions/setup-python@[0-9a-f]{40}")
+
+        tf_deploy_wf = (REPO_ROOT / ".github/workflows/terraform-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("vars.GCP_WIF_SERVICE_ACCOUNT || vars.GCP_SERVICE_ACCOUNT", tf_deploy_wf)
+        self.assertIn("vars.GCP_TFSTATE_BUCKET || vars.TF_STATE_BUCKET", tf_deploy_wf)
+        build_wf = (REPO_ROOT / ".github/workflows/build-batch-loader.yml").read_text(encoding="utf-8")
+        self.assertIn("vars.GCP_WIF_SERVICE_ACCOUNT || vars.GCP_SERVICE_ACCOUNT", build_wf)
+
+    def test_questionnaire_and_brownfield_doc_alignment(self) -> None:
+        questionnaire_path = REPO_ROOT / "QUESTIONNAIRE.md"
+        self.assertTrue(questionnaire_path.is_file(), "Missing QUESTIONNAIRE.md")
+        q_text = questionnaire_path.read_text(encoding="utf-8")
+
+        required_q_tokens = (
+            "https://github.com/choo737/gcp-launchpad",
+            "platform-context.json",
+            "link-stages.sh",
+            "generate-brownfield-link.py",
+            "00_linked.auto.tfvars.json",
+            "core_project_id",
+            "compute_project_id",
+            "analytics_project_id",
+            "bronze_dataset_id",
+            "silver_dataset_id",
+            "gold_dataset_id",
+            "quarantine_dataset_id",
+            "landing_bucket_name",
+            "dataform_repository_name",
+            "kms_key_id",
+            "vpc_id",
+            "subnet_id",
+            "pii_restricted_policy_tag_id",
+            "pii_masked_policy_tag_id",
+            "enable_datastream_cdc",
+            "enable_pubsub_stream",
+            "enable_batch_job",
+            "batch_vpc_egress",
+            "PRIVATE_RANGES_ONLY",
+            "ALL_TRAFFIC",
+            "schedule_cron",
+            "schedule_time_zone",
+            "Asia/Kuala_Lumpur",
+            "delete_contents_on_destroy",
+            "alert_email_addresses",
+            "notification_channel_ids",
+        )
+        for token in required_q_tokens:
+            self.assertIn(token, q_text, f"QUESTIONNAIRE.md missing {token}")
+
+        doc_paths = (
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "AGENTS.md",
+            REPO_ROOT / "CLAUDE.md",
+            REPO_ROOT / ".agents/skills/setup-data-ingestion/SKILL.md",
+        )
+        for doc_path in doc_paths:
+            doc_text = doc_path.read_text(encoding="utf-8")
+            rel = str(doc_path.relative_to(REPO_ROOT))
+            for ref in (
+                "QUESTIONNAIRE.md",
+                "platform-context.json",
+                "https://github.com/choo737/gcp-launchpad",
+            ):
+                self.assertIn(ref, doc_text, f"{rel} missing {ref}")
+
+        gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("platform-context.json", gitignore)
+        self.assertIn(".cm_project", gitignore)
+        self.assertIn(".codemender/", gitignore)
+        self.assertNotIn(".terraform.lock.hcl", gitignore)
+
+    def test_batch_elt_job_multi_feed_sa_and_partition_field(self) -> None:
+        batch_vars = (REPO_ROOT / "modules/ingestion/batch-elt-job/variables.tf").read_text(encoding="utf-8")
+        batch_main = (REPO_ROOT / "modules/ingestion/batch-elt-job/main.tf").read_text(encoding="utf-8")
+        batch_outs = (REPO_ROOT / "modules/ingestion/batch-elt-job/outputs.tf").read_text(encoding="utf-8")
+
+        self.assertIn('variable "partition_field"', batch_vars)
+        self.assertIn('default     = "order_date"', batch_vars)
+        self.assertIn('variable "service_account_email"', batch_vars)
+
+        self.assertIn("count = local.effective_existing_sa == \"\" ? 1 : 0", batch_main)
+        self.assertIn("local.default_sa_account_id : local.derived_sa_account_id", batch_main)
+        self.assertIn("substr(local.padded_sa_slug, 0, 28)", batch_main)
+        self.assertIn("member = local.effective_sa_member", batch_main)
+        self.assertIn("service_account = local.effective_sa_email", batch_main)
+        self.assertIn("field = local.effective_partition_field != \"\" ? local.effective_partition_field : null", batch_main)
+        self.assertIn("value       = local.effective_sa_email", batch_outs)
+
+    def test_enterprise_multi_pipeline_maps_schemas_and_adoption_guide(self) -> None:
+        ent_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
+        ent_main = (REPO_ROOT / "stages/enterprise/main.tf").read_text(encoding="utf-8")
+        ent_outs = (REPO_ROOT / "stages/enterprise/outputs.tf").read_text(encoding="utf-8")
+
+        for var_name in (
+            "pubsub_streams",
+            "batch_jobs",
+            "datastream_streams",
+            "enable_shared_datastream_private_connection",
+            "shared_datastream_private_connection_id",
+        ):
+            self.assertIn(f'variable "{var_name}"', ent_vars)
+
+        for out_name in (
+            "additional_pubsub_topics",
+            "additional_batch_jobs",
+            "additional_datastream_streams",
+            "shared_datastream_private_connection_id",
+        ):
+            self.assertIn(f'output "{out_name}"', ent_outs)
+
+        self.assertIn('resource "google_datastream_private_connection" "shared"', ent_main)
+        self.assertIn('module "pubsub_streams"', ent_main)
+        self.assertIn('module "batch_jobs"', ent_main)
+        self.assertIn('module "datastream_streams"', ent_main)
+        self.assertIn("local.any_pubsub_enabled", ent_main)
+        self.assertIn("local.any_batch_enabled", ent_main)
+        self.assertIn("local.any_datastream_enabled", ent_main)
+
+        schemas_readme = REPO_ROOT / "schemas/README.md"
+        proto_path = REPO_ROOT / "schemas/pubsub/crm_events.proto"
+        crm_json_path = REPO_ROOT / "schemas/bigquery/crm_events_bronze.json"
+        erp_json_path = REPO_ROOT / "schemas/bigquery/erp_invoices_bronze.json"
+        for p in (schemas_readme, proto_path, crm_json_path, erp_json_path):
+            self.assertTrue(p.is_file(), f"Missing schema asset {p}")
+
+        proto_text = proto_path.read_text(encoding="utf-8")
+        self.assertIn('syntax = "proto3";', proto_text)
+        self.assertIn("message CrmCustomerEvent", proto_text)
+
+        crm_cols = json.loads(crm_json_path.read_text(encoding="utf-8"))
+        crm_names = {c["name"] for c in crm_cols}
+        self.assertTrue({"event_id", "customer_id", "subscription_name", "message_id", "publish_time", "attributes"}.issubset(crm_names))
+
+        erp_cols = json.loads(erp_json_path.read_text(encoding="utf-8"))
+        erp_names = {c["name"] for c in erp_cols}
+        self.assertTrue({"invoice_id", "invoice_date", "vendor_id", "total_amount", "_ingested_at"}.issubset(erp_names))
+
+        guide_path = REPO_ROOT / "docs/03-enterprise-adoption-guide.md"
+        self.assertTrue(guide_path.is_file(), "Missing docs/03-enterprise-adoption-guide.md")
+        guide_text = guide_path.read_text(encoding="utf-8")
+        for token in (
+            "flowchart LR",
+            "pubsub_streams",
+            "batch_jobs",
+            "datastream_streams",
+            "enable_shared_datastream_private_connection",
+            "schemas/pubsub/crm_events.proto",
+            "schemas/bigquery/erp_invoices_bronze.json",
+            "link-stages.sh",
+            "generate-brownfield-link.py",
+            "build-batch-loader.yml",
+            "terraform-deploy.yml",
+            "pipeline_runs",
+            "https://github.com/choo737/gcp-launchpad",
+            "https://github.com/choo737/gcp-foundation",
+            "https://github.com/choo737/gcp-data-medallion",
+        ):
+            self.assertIn(token, guide_text, f"Adoption guide missing {token}")
+
+        readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("\n# GCP Data Ingestion\n", readme_text)
+        self.assertEqual(
+            [line.strip() for line in readme_text.splitlines() if line.startswith("## ")],
+            suite_doc_contract.CANONICAL_README_H2_SECTIONS,
+        )
+        self.assertEqual(
+            suite_doc_contract.validate_repo_suite_contract(REPO_ROOT, "gcp-data-ingestion"),
+            [],
+        )
+        for token in (
+            "https://github.com/choo737/gcp-launchpad",
+            "https://github.com/choo737/gcp-foundation",
+            "https://github.com/choo737/gcp-data-medallion",
+            "gcp-webapp",
+            "gcp-adk-agent",
+            "### Day-2 Multi-Pipeline Example",
+            "### Antigravity or OpenAI Codex",
+            "### Claude Code",
+            "setup-data-ingestion",
+            "add-streaming-topic",
+            "add-batch-feed",
+            "add-cdc-source",
+            "split-domain-ingestion",
+            "docs/03-enterprise-adoption-guide.md",
+            "pubsub_streams",
+            "batch_jobs",
+            "datastream_streams",
+            "schemas/",
+            "[LICENSE](LICENSE)",
+        ):
+            self.assertIn(token, readme_text, f"README.md missing {token}")
+
+        agents_text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        claude_text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        for token in (
+            "docs/03-enterprise-adoption-guide.md",
+            "schemas/",
+            "https://github.com/choo737/gcp-foundation",
+            "https://github.com/choo737/gcp-data-medallion",
+        ):
+            self.assertIn(token, agents_text, f"AGENTS.md missing {token}")
+            self.assertIn(token, claude_text, f"CLAUDE.md missing {token}")
+        self.assertIn("add-batch-feed", agents_text)
+
+    def test_enterprise_terraform_validate_and_path_traversal_rejection(self) -> None:
+        tf_bin = shutil.which("terraform")
+        if tf_bin is None:
+            self.skipTest("terraform binary not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_repo = Path(tmp) / "repo"
+            for folder in ("modules", "schemas", "stages", "workflows"):
+                shutil.copytree(REPO_ROOT / folder, tmp_repo / folder)
+
+            ent_dir = tmp_repo / "stages" / "enterprise"
+            versions_path = ent_dir / "versions.tf"
+            versions_path.write_text(
+                versions_path.read_text(encoding="utf-8").replace('backend "gcs" {}', 'backend "local" {}'),
+                encoding="utf-8",
+            )
+            shutil.rmtree(ent_dir / ".terraform", ignore_errors=True)
+            cached_providers = REPO_ROOT / "stages" / "enterprise" / ".terraform" / "providers"
+            init_cmd = [tf_bin, f"-chdir={ent_dir}", "init", "-input=false"]
+            if cached_providers.is_dir():
+                init_cmd.append(f"-plugin-dir={cached_providers}")
+            init_res = subprocess.run(init_cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(init_res.returncode, 0, init_res.stderr)
+
+            tfvars = {
+                "core_storage_project_id": "core-proj-1",
+                "etl_compute_project_id": "etl-proj-1",
+                "bronze_dataset_id": "ent_bronze_raw",
+                "landing_bucket_name": "core-proj-1-landing",
+                "dataform_repository_name": "ent-medallion",
+                "batch_container_image": "asia-southeast1-docker.pkg.dev/etl-proj-1/repo/gcs-to-bronze@sha256:" + "0" * 64,
+                "enable_shared_datastream_private_connection": True,
+                "datastream_network_attachment_id": "projects/net/regions/asia-southeast1/networkAttachments/ds",
+                "pubsub_streams": {
+                    "crm-events": {
+                        "target_table_id": "crm_events_stream",
+                        "schema_type": "PROTOCOL_BUFFER",
+                        "schema_file": "schemas/pubsub/crm_events.proto",
+                        "target_table_schema_file": "schemas/bigquery/crm_events_bronze.json",
+                        "target_clustering": ["segment", "event_type"],
+                    }
+                },
+                "batch_jobs": {
+                    "erp-invoices": {
+                        "source_prefix": "incoming/erp_invoices/",
+                        "target_table": "erp_invoices_bronze",
+                        "partition_field": "invoice_date",
+                        "target_table_schema_file": "schemas/bigquery/erp_invoices_bronze.json",
+                    },
+                    "hr-roster": {
+                        "source_prefix": "incoming/hr_roster/",
+                        "target_table": "hr_roster_bronze",
+                        "partition_field": "",
+                    },
+                },
+                "datastream_streams": {
+                    "erp-db": {
+                        "source_engine": "POSTGRESQL",
+                        "db_host": "10.20.0.15",
+                        "db_username": "datastream_rep",
+                        "db_database": "erp_prod",
+                        "db_password_secret_version": "projects/etl-proj-1/secrets/erp-pwd/versions/1",
+                    },
+                    "billing-db": {
+                        "source_engine": "MYSQL",
+                        "db_host": "10.20.0.16",
+                        "db_username": "datastream_rep",
+                        "db_password_secret_version": "projects/etl-proj-1/secrets/billing-pwd/versions/1",
+                        "cdc_mode": "MERGE",
+                    },
+                },
+            }
+            tfvars_path = ent_dir / "multi_pipeline_test.auto.tfvars.json"
+            tfvars_path.write_text(json.dumps(tfvars), encoding="utf-8")
+
+            val_res = subprocess.run([tf_bin, f"-chdir={ent_dir}", "validate"], capture_output=True, text=True, check=False)
+            self.assertEqual(val_res.returncode, 0, val_res.stdout + val_res.stderr)
+
+            ok_console = subprocess.run(
+                [tf_bin, f"-chdir={ent_dir}", "console"],
+                input="keys(var.pubsub_streams)\nkeys(var.batch_jobs)\nkeys(var.datastream_streams)\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(ok_console.returncode, 0, ok_console.stderr)
+            self.assertEqual(ok_console.stderr.strip(), "")
+
+            tfvars["pubsub_streams"]["crm-events"]["schema_file"] = "schemas/../etc/passwd"
+            tfvars_path.write_text(json.dumps(tfvars), encoding="utf-8")
+            bad_pubsub = subprocess.run(
+                [tf_bin, f"-chdir={ent_dir}", "console"],
+                input="keys(var.pubsub_streams)\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("Invalid value for variable", bad_pubsub.stderr)
+
+            tfvars["pubsub_streams"]["crm-events"]["schema_file"] = "schemas/pubsub/crm_events.proto"
+            tfvars["batch_jobs"]["erp-invoices"]["target_table_schema_file"] = "../outside.json"
+            tfvars_path.write_text(json.dumps(tfvars), encoding="utf-8")
+            bad_batch = subprocess.run(
+                [tf_bin, f"-chdir={ent_dir}", "console"],
+                input="keys(var.batch_jobs)\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("Invalid value for variable", bad_batch.stderr)
+
+    def test_makefile_stage_normalization_tfstate_bucket_and_link_help(self) -> None:
+        script_path = REPO_ROOT / "scripts" / "link-stages.sh"
+        for flag in ("-h", "--help"):
+            help_res = subprocess.run(
+                [str(script_path), flag],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(help_res.returncode, 0, help_res.stderr)
+            self.assertIn("Usage:", help_res.stderr)
+
+        for bad_uri in ("gs://ab/out.json", "gs://BAD_BUCKET/out.json", "s3://example-state/out.json"):
+            bad_res = subprocess.run(
+                [str(script_path), "--export-gcs", bad_uri, "stages/enterprise"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_res.returncode, 0)
+            self.assertIn("Invalid GCS URI", bad_res.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            log_file = tmp_path / "tf_calls.log"
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, sys\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(sys.argv[1:]) + '\\n')\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["TF_CALL_LOG"] = str(log_file)
+
+            plan_res = subprocess.run(
+                [
+                    "make",
+                    "plan",
+                    "STAGE=stages/enterprise",
+                    "ENV=dev",
+                    "TFSTATE_BUCKET=my-bucket",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(plan_res.returncode, 0, plan_res.stdout + plan_res.stderr)
+            calls = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertIn("-chdir=stages/enterprise init", calls[0])
+            self.assertIn("-backend-config=bucket=my-bucket", calls[0])
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/dev", calls[0])
+            self.assertIn("-chdir=stages/enterprise plan", calls[1])
+
+            log_file.unlink()
+            legacy_res = subprocess.run(
+                [
+                    "make",
+                    "init",
+                    "STAGE=enterprise",
+                    "ENV=uat",
+                    "TF_STATE_BUCKET=legacy-bucket",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(legacy_res.returncode, 0, legacy_res.stdout + legacy_res.stderr)
+            legacy_calls = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(legacy_calls), 1)
+            self.assertIn("-chdir=stages/enterprise init", legacy_calls[0])
+            self.assertIn("-backend-config=bucket=legacy-bucket", legacy_calls[0])
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/uat", legacy_calls[0])
+
+            bad_stage = subprocess.run(
+                ["make", "init", "STAGE=unknown", "TFSTATE_BUCKET=my-bucket"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_stage.returncode, 0)
+
+            # Verify DOMAIN_NAME backend prefix namespacing and validation in Makefile.
+            log_file.unlink()
+            dom_res = subprocess.run(
+                [
+                    "make",
+                    "init",
+                    "STAGE=enterprise",
+                    "ENV=dev",
+                    "DOMAIN_NAME=retail",
+                    "TFSTATE_BUCKET=my-bucket",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(dom_res.returncode, 0, dom_res.stdout + dom_res.stderr)
+            dom_calls = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertIn("-backend-config=prefix=ingestion/retail/enterprise/dev", dom_calls[0])
+
+            bad_dom = subprocess.run(
+                ["make", "init", "STAGE=enterprise", "DOMAIN_NAME=BAD_DOMAIN!", "TFSTATE_BUCKET=my-bucket"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_dom.returncode, 0)
+
+    def test_decisions_2_3_4_manage_kms_iam_domain_name_pubsub_default_and_ci(self) -> None:
+        ent_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
+        ent_main = (REPO_ROOT / "stages/enterprise/main.tf").read_text(encoding="utf-8")
+        batch_vars = (REPO_ROOT / "modules/ingestion/batch-elt-job/variables.tf").read_text(encoding="utf-8")
+        batch_main = (REPO_ROOT / "modules/ingestion/batch-elt-job/main.tf").read_text(encoding="utf-8")
+
+        self.assertIn('variable "manage_kms_iam"', ent_vars)
+        self.assertIn('variable "manage_kms_iam"', batch_vars)
+        self.assertIn("local.use_cmek && var.manage_kms_iam", ent_main)
+        self.assertIn("local.effective_kms_key_id != \"\" && var.manage_kms_iam", batch_main)
+        self.assertEqual(ent_main.count("manage_kms_iam               = var.manage_kms_iam"), 2)
+
+        self.assertIn('variable "domain_name"', ent_vars)
+        self.assertIn("local.workflow_prefix", ent_main)
+        self.assertIn("local.pubsub_stream_name", ent_main)
+        self.assertRegex(ent_main, r'module\s+"batch_elt_job"[\s\S]*?prefix\s*=\s*local\.workflow_prefix')
+
+        self.assertRegex(ent_vars, r'variable\s+"enable_pubsub_stream"[\s\S]*?default\s*=\s*false')
+        for example_rel in (
+            "stages/enterprise/terraform.tfvars.example",
+            "stages/enterprise/envs/dev.tfvars.example",
+            "stages/enterprise/envs/uat.tfvars.example",
+            "stages/enterprise/envs/prod.tfvars.example",
+        ):
+            ex_text = (REPO_ROOT / example_rel).read_text(encoding="utf-8")
+            self.assertRegex(ex_text, r"enable_pubsub_stream\s*=\s*false", f"{example_rel} should default enable_pubsub_stream = false")
+
+        uat_example = (REPO_ROOT / "stages/enterprise/envs/uat.tfvars.example").read_text(encoding="utf-8")
+        self.assertRegex(uat_example, r'environment\s*=\s*"uat"')
+
+        deploy_wf = (REPO_ROOT / ".github/workflows/terraform-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("domain_name:", deploy_wf)
+        self.assertIn('BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/', deploy_wf)
+        for uat_token in (
+            "- uat",
+            "apply-uat:",
+            "environment: uat",
+            "./scripts/link-stages.sh --env uat",
+            'BACKEND_PREFIX="ingestion/${DOMAIN_NAME}/enterprise/uat"',
+            'BACKEND_PREFIX="ingestion/enterprise/uat"',
+            "envs/uat.tfvars",
+        ):
+            self.assertIn(uat_token, deploy_wf)
+        self.assertNotIn("envs/uat.tfvars.example", deploy_wf)
+
+        build_wf = (REPO_ROOT / ".github/workflows/build-batch-loader.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            build_wf.count("(vars.GCP_WIF_SERVICE_ACCOUNT != '' || vars.GCP_SERVICE_ACCOUNT != '')"),
+            5,
+        )
+
+        guide = (REPO_ROOT / "docs/03-enterprise-adoption-guide.md").read_text(encoding="utf-8")
+        self.assertIn("gs://<iac-outputs-bucket>/foundation-outputs.json", guide)
+
+        # Verify link-stages.sh --domain-name namespacing in local mode and bad --domain-name rejection.
+        script_path = REPO_ROOT / "scripts/link-stages.sh"
+        bad_dom_link = subprocess.run(
+            [str(script_path), "--domain-name", "BAD!", "stages/enterprise", "stages/enterprise"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(bad_dom_link.returncode, 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            src = tmp_path / "stages" / "enterprise"
+            (src / "envs").mkdir(parents=True)
+            dst = tmp_path / "dst"
+            dst.mkdir()
+            (dst / "variables.tf").write_text(
+                'variable "environment" {\n  type = string\n}\n'
+                'variable "domain_name" {\n  type = string\n}\n'
+                'variable "kms_key_id" {\n  type = string\n}\n',
+                encoding="utf-8",
+            )
+            call_log = tmp_path / "tf_calls.log"
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(args) + '\\n')\n"
+                "if 'output' in args:\n"
+                "    print(json.dumps({'kms_key_id': {'value': 'k1'}}))\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["TF_CALL_LOG"] = str(call_log)
+            res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--domain-name",
+                    "retail",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    "stages/enterprise",
+                    str(dst),
+                ],
+                cwd=tmp_path,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            calls = call_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("-backend-config=prefix=ingestion/retail/enterprise/dev", calls[0])
+            linked = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(linked["domain_name"], "retail")
+
+            # Verify resolve_backend_prefix handles internal stages/enterprise and external ../gcp-foundation/data/enterprise/01-platform.
+            ext_foundation = tmp_path / "gcp-foundation"
+            ext_stage = ext_foundation / "data" / "enterprise" / "01-platform"
+            (ext_foundation / ".git").mkdir(parents=True)
+            (ext_stage / "envs").mkdir(parents=True)
+            work_sub = tmp_path / "runner"
+            work_sub.mkdir()
+            call_log.unlink()
+            ext_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(REPO_ROOT / "stages/enterprise"),
+                    "../gcp-foundation/data/enterprise/01-platform",
+                    str(dst),
+                ],
+                cwd=work_sub,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(ext_res.returncode, 0, ext_res.stderr)
+            ext_calls = call_log.read_text(encoding="utf-8").splitlines()
+            init_lines = [line for line in ext_calls if " init " in line]
+            self.assertEqual(len(init_lines), 2)
+            self.assertIn("-backend-config=prefix=ingestion/enterprise/dev", init_lines[0])
+            self.assertIn("-backend-config=prefix=data/enterprise/01-platform/dev", init_lines[1])
+            prefixes = re.findall(r"-backend-config=prefix=([^\s]+)", "\n".join(init_lines))
+            self.assertEqual(prefixes, ["ingestion/enterprise/dev", "data/enterprise/01-platform/dev"])
+
+            # Verify --domain-name never prefixes external gcp-foundation stages and maps 01-org-governance to /shared.
+            ext_org_gov = ext_foundation / "foundation" / "01-org-governance"
+            ext_org_gov.mkdir(parents=True)
+            (ext_org_gov / "versions.tf").write_text('terraform {\n  backend "gcs" {}\n}\n', encoding="utf-8")
+            call_log.unlink()
+            dom_ext_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--domain-name",
+                    "retail",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(REPO_ROOT / "stages/enterprise"),
+                    "../gcp-foundation/foundation/01-org-governance",
+                    "../gcp-foundation/data/enterprise/01-platform",
+                    str(dst),
+                ],
+                cwd=work_sub,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(dom_ext_res.returncode, 0, dom_ext_res.stderr)
+            dom_ext_init_lines = [line for line in call_log.read_text(encoding="utf-8").splitlines() if " init " in line]
+            dom_ext_prefixes = re.findall(r"-backend-config=prefix=([^\s]+)", "\n".join(dom_ext_init_lines))
+            self.assertEqual(
+                dom_ext_prefixes,
+                [
+                    "ingestion/retail/enterprise/dev",
+                    "foundation/01-org-governance/shared",
+                    "data/enterprise/01-platform/dev",
+                ],
+            )
+
+            # Verify --env uat succeeds in local/GCS modes and non-.git apps/ fallback, while --env qa fails.
+            uat_src = tmp_path / "uat_stage"
+            (uat_src / "uat").mkdir(parents=True)
+            uat_tf = bin_dir / "terraform"
+            uat_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "print(json.dumps({'environment': {'value': 'uat', 'sensitive': False}, 'kms_key_id': {'value': 'k-uat'}}))\n",
+                encoding="utf-8",
+            )
+            uat_tf.chmod(0o755)
+            uat_res = subprocess.run(
+                [str(script_path), "--env", "uat", str(uat_src), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(uat_res.returncode, 0, uat_res.stderr)
+            uat_linked = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(uat_linked["environment"], "uat")
+            self.assertEqual(uat_linked["kms_key_id"], "k-uat")
+
+            apps_nogit = tmp_path / "nogit-apps" / "apps" / "enterprise"
+            (apps_nogit / "envs").mkdir(parents=True)
+            apps_tf = bin_dir / "terraform"
+            apps_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+                "if 'output' in sys.argv:\n"
+                "    print(json.dumps({'environment': {'value': 'uat', 'sensitive': False}, 'kms_key_id': {'value': 'k-uat'}}))\n",
+                encoding="utf-8",
+            )
+            apps_tf.chmod(0o755)
+            call_log.unlink()
+            apps_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "uat",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(apps_nogit),
+                    str(dst),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(apps_res.returncode, 0, apps_res.stderr)
+            apps_init = [l for l in call_log.read_text(encoding="utf-8").splitlines() if " init " in l]
+            self.assertTrue(any("-backend-config=prefix=apps/enterprise/uat" in l for l in apps_init), apps_init)
+
+            bad_env_res = subprocess.run(
+                [str(script_path), "--env", "qa", str(uat_src), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_env_res.returncode, 0)
+            self.assertIn("Invalid --env value: qa", bad_env_res.stderr)
+
+            # Verify external gcp-data-science -> data-science/..., external gcp-data-ingestion -> ingestion/..., and OUTPUT_ALIASES.
+            ext_ds = tmp_path / "gcp-data-science" / "stages" / "enterprise"
+            ext_ing = tmp_path / "gcp-data-ingestion" / "stages" / "enterprise"
+            ((tmp_path / "gcp-data-science") / ".git").mkdir(parents=True)
+            ((tmp_path / "gcp-data-ingestion") / ".git").mkdir(parents=True)
+            (ext_ds / "envs").mkdir(parents=True)
+            (ext_ing / "envs").mkdir(parents=True)
+            alias_dst = tmp_path / "alias_dst"
+            alias_dst.mkdir()
+            (alias_dst / "variables.tf").write_text(
+                'variable "kms_key_id" {\n  type = string\n}\n'
+                'variable "vpc_id" {\n  type = string\n}\n'
+                'variable "environment" {\n  type = string\n}\n',
+                encoding="utf-8",
+            )
+            alias_tf = bin_dir / "terraform"
+            alias_tf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "with open(os.environ['TF_CALL_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+                "if 'output' in sys.argv:\n"
+                "    print(json.dumps({'environment': {'value': 'dev', 'sensitive': False}, 'kms_key_name': {'value': 'kms-alias'}, 'network_id': {'value': 'vpc-alias'}}))\n",
+                encoding="utf-8",
+            )
+            alias_tf.chmod(0o755)
+            call_log.unlink()
+            alias_res = subprocess.run(
+                [
+                    str(script_path),
+                    "--env",
+                    "dev",
+                    "--tfstate-bucket",
+                    "my-bucket",
+                    str(ext_ds),
+                    str(ext_ing),
+                    str(alias_dst),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(alias_res.returncode, 0, alias_res.stderr)
+            alias_init_lines = [l for l in call_log.read_text(encoding="utf-8").splitlines() if " init " in l]
+            alias_prefixes = re.findall(r"-backend-config=prefix=([^\s]+)", "\n".join(alias_init_lines))
+            self.assertEqual(alias_prefixes, ["data-science/enterprise/dev", "ingestion/enterprise/dev"])
+            alias_linked = json.loads((alias_dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(alias_linked["kms_key_id"], "kms-alias")
+            self.assertEqual(alias_linked["vpc_id"], "vpc-alias")
+
+    def test_link_stages_prefers_data_subnet_id_in_local_and_gcs_modes(self) -> None:
+        script_path = REPO_ROOT / "scripts" / "link-stages.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            gcs_store = tmp_path / "gcs_store"
+            src_net = tmp_path / "02-security-network"
+            dst = tmp_path / "stages" / "enterprise"
+            for d in (bin_dir, gcs_store, src_net, dst):
+                d.mkdir(parents=True)
+
+            (dst / "variables.tf").write_text(
+                'variable "subnet_id" {\n  type = string\n}\n'
+                'variable "environment" {\n  type = string\n}\n',
+                encoding="utf-8",
+            )
+
+            base_sub = "projects/net/regions/asia-southeast1/subnetworks/base-sub"
+            data_sub = "projects/net/regions/asia-southeast1/subnetworks/data-sub"
+            ai_sub = "projects/net/regions/asia-southeast1/subnetworks/ai-sub"
+
+            tf_shim = bin_dir / "terraform"
+            tf_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps({\n"
+                "  'environment': {'value': 'uat', 'sensitive': False},\n"
+                f"  'subnet_id': {{'value': {base_sub!r}, 'sensitive': False}},\n"
+                f"  'data_subnet_id': {{'value': {data_sub!r}, 'sensitive': False}},\n"
+                f"  'ai_subnet_id': {{'value': {ai_sub!r}, 'sensitive': False}},\n"
+                "}))\n",
+                encoding="utf-8",
+            )
+            tf_shim.chmod(0o755)
+
+            gcloud_shim = bin_dir / "gcloud"
+            gcloud_shim.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import shutil, sys\n"
+                f"store = Path({str(gcs_store)!r})\n"
+                "args = sys.argv[1:]\n"
+                "assert args[:2] == ['storage', 'cp']\n"
+                "src, dst_arg = args[2], args[3]\n"
+                "if dst_arg.startswith('gs://'):\n"
+                "    shutil.copyfile(src, store / dst_arg.replace('gs://', '').replace('/', '__'))\n"
+                "elif src.startswith('gs://') and dst_arg == '-':\n"
+                "    sys.stdout.write((store / src.replace('gs://', '').replace('/', '__')).read_text(encoding='utf-8'))\n",
+                encoding="utf-8",
+            )
+            gcloud_shim.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            local_res = subprocess.run(
+                [str(script_path), "--env", "uat", str(src_net), str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(local_res.returncode, 0, local_res.stderr)
+            linked_local = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(linked_local["subnet_id"], data_sub)
+            self.assertEqual(linked_local["environment"], "uat")
+
+            (dst / "00_linked.auto.tfvars.json").unlink()
+            gcs_uri = "gs://example-state/foundation-outputs.json"
+            exp_res = subprocess.run(
+                [str(script_path), "--env", "uat", "--export-gcs", gcs_uri, str(src_net)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exp_res.returncode, 0, exp_res.stderr)
+
+            gcs_res = subprocess.run(
+                [str(script_path), "--env", "uat", "--from-gcs", gcs_uri, str(dst)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(gcs_res.returncode, 0, gcs_res.stderr)
+            linked_gcs = json.loads((dst / "00_linked.auto.tfvars.json").read_text(encoding="utf-8"))
+            self.assertEqual(linked_gcs["subnet_id"], data_sub)
+            self.assertEqual(linked_gcs["environment"], "uat")
+
+    def test_loader_fail_closed_transient_retry_and_metadata_stamping(self) -> None:
+        cfg = loader.LoaderConfig(
+            bronze_project="bronze-proj",
+            bronze_dataset="ent_bronze_raw",
+            execution_project="etl-proj",
+            landing_bucket="bronze-proj-landing",
+            source_prefix="incoming/",
+            target_table="pos_orders_batch_cdc",
+        )
+
+        # 1. claim_watermark must fail closed when num_dml_affected_rows is None or bool.
+        bq_null = MagicMock()
+        null_claim_job = MagicMock()
+        null_claim_job.num_dml_affected_rows = None
+        null_claim_job.result.return_value = []
+        bq_null.query.return_value = null_claim_job
+        self.assertFalse(
+            loader.claim_watermark(
+                bq_null,
+                "bronze-proj.ent_bronze_raw._ingestion_watermarks",
+                "gs://b/incoming/a.json",
+                1,
+                "tok1",
+            )
+        )
+        merge_sql = bq_null.query.call_args.args[0]
+        self.assertIn("T.loaded_at >= TIMESTAMP_SUB", merge_sql)
+
+        # 2. Transient HTTP errors (429/500/502/503/504) release watermark and re-raise without quarantining.
+        for status_code in (429, 500, 502, 503, 504):
+            with self.subTest(status_code=status_code):
+                bq_t = MagicMock()
+                sel_job = MagicMock()
+                sel_job.result.return_value = []
+                claim_job = MagicMock()
+                claim_job.num_dml_affected_rows = 1
+                claim_job.result.return_value = []
+                rel_job = MagicMock()
+                rel_job.result.return_value = []
+                bq_t.query.side_effect = [sel_job, claim_job, rel_job]
+
+                transient_err = GoogleAPICallError(f"http {status_code}")
+                setattr(transient_err, "code", status_code)
+                bq_t.load_table_from_uri.side_effect = transient_err
+
+                blob = MagicMock()
+                blob.name = "incoming/retry.json"
+                blob.generation = 77
+                bucket = MagicMock()
+                storage_t = MagicMock()
+                storage_t.bucket.return_value = bucket
+                storage_t.list_blobs.return_value = [blob]
+
+                with self.assertRaises(GoogleAPICallError):
+                    loader.run_batch(config=cfg, bq_client=bq_t, storage_client=storage_t)
+                bucket.copy_blob.assert_not_called()
+                blob.delete.assert_not_called()
+                self.assertIn("DELETE FROM", bq_t.query.call_args_list[2].args[0])
+                self.assertIn("loaded_at >= TIMESTAMP_SUB", bq_t.query.call_args_list[2].args[0])
+
+        # 3. 400 BadRequest load errors still quarantine and release watermark.
+        bq_bad = MagicMock()
+        sel_bad = MagicMock()
+        sel_bad.result.return_value = []
+        claim_bad = MagicMock()
+        claim_bad.num_dml_affected_rows = 1
+        claim_bad.result.return_value = []
+        rel_bad = MagicMock()
+        rel_bad.result.return_value = []
+        bq_bad.query.side_effect = [sel_bad, claim_bad, rel_bad]
+        bad_req = GoogleAPICallError("bad payload")
+        setattr(bad_req, "code", 400)
+        bq_bad.load_table_from_uri.side_effect = bad_req
+
+        bad_blob = MagicMock()
+        bad_blob.name = "incoming/malformed.json"
+        bad_blob.generation = 88
+        bucket_bad = MagicMock()
+        bucket_bad.name = "bronze-proj-landing"
+        storage_bad = MagicMock()
+        storage_bad.bucket.return_value = bucket_bad
+        storage_bad.list_blobs.return_value = [bad_blob]
+        with self.assertRaises(loader.QuarantineError):
+            loader.run_batch(config=cfg, bq_client=bq_bad, storage_client=storage_bad)
+        bucket_bad.copy_blob.assert_called_once()
+        bad_blob.delete.assert_called_once()
+
+        # 4. Metadata stamping runs once post-batch and populates _ingested_at and _op_type.
+        bq_meta = MagicMock()
+        meta_table = MagicMock()
+        meta_table.schema = [
+            loader.bigquery.SchemaField("order_id", "STRING"),
+            loader.bigquery.SchemaField("order_date", "DATE"),
+            loader.bigquery.SchemaField("_ingested_at", "TIMESTAMP"),
+            loader.bigquery.SchemaField("_op_type", "STRING"),
+        ]
+        meta_table.time_partitioning = loader.bigquery.TimePartitioning(type_="DAY", field="order_date")
+        bq_meta.get_table.return_value = meta_table
+        sel_m = MagicMock()
+        sel_m.result.return_value = []
+        claim_m = MagicMock()
+        claim_m.num_dml_affected_rows = 1
+        claim_m.result.return_value = []
+        comp_m = MagicMock()
+        comp_m.result.return_value = []
+        stamp_m = MagicMock()
+        stamp_m.result.return_value = []
+        bq_meta.query.side_effect = [sel_m, claim_m, comp_m, stamp_m]
+        load_m = MagicMock()
+        load_m.job_id = "job-meta-1"
+        load_m.output_rows = 5
+        load_m.result.return_value = None
+        bq_meta.load_table_from_uri.return_value = load_m
+
+        good_blob = MagicMock()
+        good_blob.name = "incoming/good.json"
+        good_blob.generation = 99
+        storage_m = MagicMock()
+        storage_m.list_blobs.return_value = [good_blob]
+        res_m = loader.run_batch(config=cfg, bq_client=bq_meta, storage_client=storage_m)
+        self.assertEqual(res_m.loaded_files, 1)
+        self.assertEqual(bq_meta.query.call_count, 4)
+        select_sql = bq_meta.query.call_args_list[0].args[0]
+        self.assertIn("UNNEST(@blob_uris)", select_sql)
+        complete_sql = bq_meta.query.call_args_list[2].args[0]
+        self.assertIn("loaded_at >= TIMESTAMP_SUB", complete_sql)
+        stamp_sql = bq_meta.query.call_args_list[3].args[0]
+        self.assertIn("_ingested_at = COALESCE(_ingested_at, @batch_ingested_at)", stamp_sql)
+        self.assertIn("_op_type = COALESCE(_op_type, 'BATCH')", stamp_sql)
+        self.assertIn("DATE_SUB(CURRENT_DATE(), INTERVAL @partition_lookback_days DAY)", stamp_sql)
+        self.assertNotIn("order_date IS NOT NULL", stamp_sql)
+
+        # 5. Forbidden (403) and NotFound (404) never quarantine blobs.
+        for non_quarantine_code in (403, 404):
+            with self.subTest(non_quarantine_code=non_quarantine_code):
+                bq_nq = MagicMock()
+                sel_nq = MagicMock()
+                sel_nq.result.return_value = []
+                claim_nq = MagicMock()
+                claim_nq.num_dml_affected_rows = 1
+                claim_nq.result.return_value = []
+                rel_nq = MagicMock()
+                rel_nq.result.return_value = []
+                bq_nq.query.side_effect = [sel_nq, claim_nq, rel_nq]
+                err_nq = GoogleAPICallError(f"http {non_quarantine_code}")
+                setattr(err_nq, "code", non_quarantine_code)
+                bq_nq.load_table_from_uri.side_effect = err_nq
+                blob_nq = MagicMock()
+                blob_nq.name = "incoming/nq.json"
+                blob_nq.generation = 101
+                bucket_nq = MagicMock()
+                storage_nq = MagicMock()
+                storage_nq.bucket.return_value = bucket_nq
+                storage_nq.list_blobs.return_value = [blob_nq]
+                with self.assertRaises(GoogleAPICallError):
+                    loader.run_batch(config=cfg, bq_client=bq_nq, storage_client=storage_nq)
+                bucket_nq.copy_blob.assert_not_called()
+                blob_nq.delete.assert_not_called()
+
+        # 6. Post-load complete_watermark failure retries transiently and raises without quarantining.
+        bq_post = MagicMock()
+        sel_p = MagicMock()
+        sel_p.result.return_value = []
+        claim_p = MagicMock()
+        claim_p.num_dml_affected_rows = 1
+        claim_p.result.return_value = []
+        err_503 = GoogleAPICallError("service unavailable")
+        setattr(err_503, "code", 503)
+        comp_fail = MagicMock()
+        comp_fail.result.side_effect = err_503
+        bq_post.query.side_effect = [sel_p, claim_p, comp_fail, comp_fail, comp_fail]
+        load_p = MagicMock()
+        load_p.job_id = "job-post-1"
+        load_p.output_rows = 3
+        load_p.result.return_value = None
+        bq_post.load_table_from_uri.return_value = load_p
+        blob_p = MagicMock()
+        blob_p.name = "incoming/post.json"
+        blob_p.generation = 202
+        bucket_p = MagicMock()
+        storage_p = MagicMock()
+        storage_p.bucket.return_value = bucket_p
+        storage_p.list_blobs.return_value = [blob_p]
+        with self.assertRaises(GoogleAPICallError):
+            loader.run_batch(config=cfg, bq_client=bq_post, storage_client=storage_p)
+        bucket_p.copy_blob.assert_not_called()
+        blob_p.delete.assert_not_called()
+        self.assertEqual(bq_post.query.call_count, 5)
+
+    def test_sandbox_reuse_quarantine_multi_bu_and_datastream_wiring(self) -> None:
+        sb_vars = (REPO_ROOT / "stages/sandbox/variables.tf").read_text(encoding="utf-8")
+        sb_main = (REPO_ROOT / "stages/sandbox/main.tf").read_text(encoding="utf-8")
+        self.assertIn('variable "landing_bucket_name"', sb_vars)
+        self.assertIn('variable "quarantine_dataset_id"', sb_vars)
+        self.assertIn("count = local.raw_landing_bucket == \"\" ? 1 : 0", sb_main)
+        self.assertIn("quarantine_dataset_id        = local.effective_quarantine_ds", sb_main)
+
+        for rel_ex in (
+            "stages/enterprise/envs/dev.tfvars.example",
+            "stages/enterprise/envs/uat.tfvars.example",
+            "stages/enterprise/envs/prod.tfvars.example",
+        ):
+            ex_txt = (REPO_ROOT / rel_ex).read_text(encoding="utf-8")
+            for linked_key in ("prefix", "delete_contents_on_destroy", "bronze_dataset_id", "landing_bucket_name", "kms_key_id"):
+                self.assertNotRegex(
+                    ex_txt,
+                    rf"(?m)^\s*{re.escape(linked_key)}\s*=",
+                    f"{rel_ex} must keep linked key '{linked_key}' commented out",
+                )
+
+        ent_vars = (REPO_ROOT / "stages/enterprise/variables.tf").read_text(encoding="utf-8")
+        ent_main = (REPO_ROOT / "stages/enterprise/main.tf").read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r'(?m)^variable\s+"[^"]+"\s*\{', ent_vars)), 92)
+        self.assertIn('variable "bi_compute_project_id"', ent_vars)
+        self.assertIn("local.resource_prefix", ent_main)
+        self.assertIn("additional_batch_job_names", ent_main)
+        self.assertIn("include_stream_orders          = local.any_pubsub_stream_enabled", ent_main)
+        self.assertIn("include_batch_orders           = local.any_batch_enabled", ent_main)
+        self.assertIn("postgresql_publication      = var.datastream_postgresql_publication", ent_main)
+        self.assertIn("included_objects            = var.datastream_included_objects", ent_main)
+        self.assertIn("start_stream                = var.datastream_start_stream", ent_main)
+
+        sb_main = (REPO_ROOT / "stages/sandbox/main.tf").read_text(encoding="utf-8")
+        self.assertIn("var.enable_pubsub_stream || var.enable_pipeline_workflow", sb_main)
+        self.assertIn("google_storage_project_service_account", sb_main)
+        self.assertIn("google_bigquery_default_service_account", sb_main)
+
+        wf_main = (REPO_ROOT / "modules/ingestion/pipeline-workflows/main.tf").read_text(encoding="utf-8")
+        self.assertIn("roles/eventarc.eventReceiver", wf_main)
+        self.assertIn("eventarc_iam_propagation", wf_main)
+        self.assertIn('local.trimmed_pii_restricted_tag != "" || local.trimmed_pii_masked_tag != ""', wf_main)
+        self.assertIn('(local.trimmed_pii_restricted_tag == "") == (local.trimmed_pii_masked_tag == "")', wf_main)
+        self.assertIn("local.dataplex_scan_projects", wf_main)
+
+        wf_yaml = (REPO_ROOT / "workflows/medallion_pipeline.workflows.yaml").read_text(encoding="utf-8")
+        self.assertIn("retry_transient_http", wf_yaml)
+        self.assertIn("IGNORED_NON_INCOMING_OBJECT", wf_yaml)
+        self.assertIn("get_release_config", wf_yaml)
+
+        build_wf = (REPO_ROOT / ".github/workflows/build-batch-loader.yml").read_text(encoding="utf-8")
+        self.assertRegex(build_wf, r"(?m)^permissions:\s*\n\s+contents:\s*read\s*\n\njobs:")
+        self.assertIn("Validate WIF service account configuration", build_wf)
+
+        pubsub_main = (REPO_ROOT / "modules/ingestion/pubsub-bigquery/main.tf").read_text(encoding="utf-8")
+        self.assertIn("local.effective_quarantine_ds", pubsub_main)
+        cdc_vars = (REPO_ROOT / "modules/ingestion/datastream-cdc/variables.tf").read_text(encoding="utf-8")
+        self.assertNotIn('variable "deletion_policy"', cdc_vars)
+
+
+if __name__ == "__main__":
+    unittest.main()

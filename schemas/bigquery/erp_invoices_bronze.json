@@ -1,0 +1,74 @@
+[
+  {
+    "name": "invoice_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Unique ERP invoice identifier."
+  },
+  {
+    "name": "invoice_date",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "Invoice posting date."
+  },
+  {
+    "name": "vendor_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Supplier or vendor identifier."
+  },
+  {
+    "name": "entity_code",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Legal entity code."
+  },
+  {
+    "name": "currency_code",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "ISO currency code."
+  },
+  {
+    "name": "subtotal_amount",
+    "type": "NUMERIC",
+    "mode": "NULLABLE",
+    "description": "Pre-tax invoice subtotal."
+  },
+  {
+    "name": "tax_amount",
+    "type": "NUMERIC",
+    "mode": "NULLABLE",
+    "description": "Invoice tax amount."
+  },
+  {
+    "name": "total_amount",
+    "type": "NUMERIC",
+    "mode": "NULLABLE",
+    "description": "Total invoice amount."
+  },
+  {
+    "name": "invoice_status",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Invoice approval or payment status."
+  },
+  {
+    "name": "updated_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Source record timestamp."
+  },
+  {
+    "name": "_metadata_deleted",
+    "type": "BOOL",
+    "mode": "NULLABLE",
+    "description": "Logical delete marker."
+  },
+  {
+    "name": "_ingested_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Batch ingestion timestamp."
+  }
+]

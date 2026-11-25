@@ -1,0 +1,64 @@
+# Link upstream gcp-foundation uat outputs via scripts/link-stages.sh --env uat before apply.
+# Replace or uncomment batch_container_image only if overriding artifact_registry_repository_uri.
+# Linked keys (set in 00_linked.auto.tfvars.json; keep commented so -var-file never clobbers):
+# core_storage_project_id   = "example-core-project"
+# etl_compute_project_id    = "example-etl-project"
+# bronze_dataset_id         = "ent_bronze_raw"
+# quarantine_dataset_id     = "ent_quarantine"
+# landing_bucket_name       = "example-core-project-landing"
+# vpc_id                    = "projects/example-net/global/networks/shared-vpc"
+# subnet_id                 = "projects/example-net/regions/asia-southeast1/subnetworks/data-sub"
+# kms_key_id                = "projects/example-gov/locations/asia-southeast1/keyRings/kr/cryptoKeys/k"
+# prefix                    = "ent"
+# delete_contents_on_destroy = false
+environment                 = "uat"
+enable_pubsub_stream        = false
+pubsub_schema_type          = "PROTOCOL_BUFFER"
+enable_batch_job            = true
+batch_image_tag             = "uat"
+# batch_container_image     = "asia-southeast1-docker.pkg.dev/example-etl-project/ent-containers/gcs-to-bronze@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+batch_source_prefix         = "incoming/"
+batch_source_format         = "NEWLINE_DELIMITED_JSON"
+batch_vpc_egress            = "PRIVATE_RANGES_ONLY"
+enable_datastream_cdc       = false
+datastream_cdc_mode         = "APPEND_ONLY"
+enable_pipeline_workflow    = true
+enable_schedule             = true
+schedule_cron               = "0 2 * * *"
+enable_gcs_eventarc_trigger = true
+
+# Optional multi-pipeline catalog (add entries here without editing main.tf):
+# enable_shared_datastream_private_connection = true
+#
+# pubsub_streams = {
+#   crm-events = {
+#     target_table_id          = "crm_events_stream"
+#     schema_type              = "PROTOCOL_BUFFER"
+#     schema_file              = "schemas/pubsub/crm_events.proto"
+#     target_table_schema_file = "schemas/bigquery/crm_events_bronze.json"
+#     target_clustering        = ["segment", "event_type"]
+#   }
+# }
+#
+# batch_jobs = {
+#   erp-invoices = {
+#     source_prefix            = "incoming/erp_invoices/"
+#     target_table             = "erp_invoices_bronze"
+#     source_format            = "NEWLINE_DELIMITED_JSON"
+#     partition_field          = "invoice_date"
+#     target_clustering        = ["entity_code", "invoice_status"]
+#     target_table_schema_file = "schemas/bigquery/erp_invoices_bronze.json"
+#   }
+# }
+#
+# datastream_streams = {
+#   erp-db = {
+#     source_engine              = "POSTGRESQL"
+#     db_host                    = "10.20.1.15"
+#     db_username                = "datastream_rep"
+#     db_database                = "erp_uat"
+#     db_password_secret_version = "projects/example-etl-project/secrets/ent-uat-erp-db-pwd/versions/1"
+#     included_objects           = { public = ["invoices", "vendors"] }
+#     cdc_mode                   = "APPEND_ONLY"
+#   }
+# }
